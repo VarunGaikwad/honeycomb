@@ -1,4 +1,4 @@
-import type { DispatchResult, ToolCall, ToolContext } from './types.ts';
+import type { DispatchResult, ToolCall, ToolContext } from '../types/index.ts';
 import { ToolRegistry } from './registry.ts';
 
 export class ToolDispatcher {

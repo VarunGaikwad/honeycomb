@@ -1,8 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { Tool, ToolContext } from './types.ts';
-
-type Args = Record<string, unknown>;
+import type { Args, Tool, ToolContext } from '../types/index.ts';
 
 /**
  * Creates the Phase 2 filesystem tools. All paths are relative to the active

@@ -6,15 +6,28 @@ A [Pi coding agent](https://pi.dev) extension package.
 
 ```
 bi/
-├── package.json      # pi manifest ("pi.extensions"), deps
+├── package.json                 # Pi manifest and package scripts
 ├── tsconfig.json
 ├── src/
-│   ├── index.ts
-│   └── slash/
-│       ├── init.ts
-│       └── system-instruction.ts
+│   ├── index.ts                 # Extension entry point
+│   ├── tui/                     # Branded interactive header and footer
+│   ├── extension/               # Pi runtime integration
+│   │   ├── index.ts             # Extension module exports
+│   │   ├── ask-user.ts          # Structured interactive prompts
+│   │   ├── quiet-startup.ts     # Project-local Pi setting
+│   │   └── register-tools.ts    # Tool registration and dispatch bridge
+│   ├── slash/                   # Slash commands and system prompt
+│   │   ├── index.ts             # Slash module exports
+│   │   ├── init.ts
+│   │   └── system-instruction.ts
+│   ├── tools/                   # Tool implementations, registry, and dispatcher
+│   └── types/                   # Shared/domain interfaces and type aliases
+├── tests/                       # Tool-system tests
 └── README.md
 ```
+
+Keep TypeScript source and test files below 1000 lines. Split files by responsibility
+before they approach that limit.
 
 ## Usage
 
@@ -34,6 +47,8 @@ Inside pi:
 
 - `/init` — analyzes the codebase and generates/updates `AGENTS.md` at the project root
 - `session_start` notification confirms the extension loaded
+- Interactive mode uses a compact branded header and a footer with the current
+  project, model, and Git branch; other modes are unchanged
 
 ### Tool execution safety
 

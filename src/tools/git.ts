@@ -1,9 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { Tool, ToolContext, ToolResult } from './types.ts';
+import type { Args, Tool, ToolContext, ToolResult } from '../types/index.ts';
 
 const execFileAsync = promisify(execFile);
-type Args = Record<string, unknown>;
 
 /** Git tools use execFile (never a shell) and run only in the active directory. */
 export function createGitTools(): Tool<Args>[] {

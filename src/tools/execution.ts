@@ -1,19 +1,12 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import type { Tool, ToolContext, ToolResult } from './types.ts';
-
-interface ManagedProcess {
-  child: ChildProcess;
-  output: string;
-  exited?: { code: number | null; signal: NodeJS.Signals | null };
-}
-
-export interface ExecutionOptions {
-  /** Upper bound for foreground commands. Defaults to 30 seconds. */
-  timeoutMs?: number;
-  /** Optional command policy. Deny by default only when this callback rejects. */
-  allowCommand?: (command: string, context: ToolContext) => boolean | Promise<boolean>;
-}
+import type {
+  ExecutionOptions,
+  ManagedProcess,
+  Tool,
+  ToolContext,
+  ToolResult,
+} from '../types/index.ts';
 
 /** Shared process lifecycle for foreground and background execution tools. */
 export class ProcessManager {

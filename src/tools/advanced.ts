@@ -1,9 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { Tool, ToolContext, ToolResult } from './types.ts';
-
-type Args = Record<string, unknown>;
+import type { Args, Tool, ToolContext, ToolResult } from '../types/index.ts';
 
 /** Persistent project-local memory and checkpoints, with optional host delegation. */
 export function createAdvancedTools(): Tool<Args>[] {

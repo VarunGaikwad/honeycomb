@@ -1,31 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { Tool, ToolContext, ToolResult } from './types.ts';
-
-type Args = Record<string, unknown>;
-interface Todo {
-  id: string;
-  text: string;
-  done: boolean;
-}
-interface UndoEntry {
-  id: string;
-  file: string;
-  before: Buffer | null;
-  afterHash: string;
-}
-interface AgentToolDefinition {
-  name: string;
-  description: string;
-  promptGuideline?: string;
-  shape: Record<string, string>;
-  execute: (args: Args, context: ToolContext) => Promise<ToolResult>;
-  arrayItems?: Record<string, unknown>;
-}
+import type {
+  AgentToolDefinition,
+  AskQuestion,
+  AskUserFn,
+  Args,
+  Todo,
+  Tool,
+  ToolContext,
+  ToolResult,
+  UndoEntry,
+} from '../types/index.ts';
 
 /** In-memory agent helpers; undo only restores files unchanged since its own edit. */
-export function createAgentTools(): Tool<Args>[] {
+export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Args>[] {
   const todos: Todo[] = [];
   const undoStack: UndoEntry[] = [];
   const definitions: AgentToolDefinition[] = [
@@ -36,7 +25,7 @@ export function createAgentTools(): Tool<Args>[] {
       promptGuideline:
         'Use todo for tasks with several distinct steps; skip it for single quick edits. Mark items complete as soon as they are done.',
       shape: { action: 'string', text: 'string?', id: 'string?' },
-      execute: async (a) => {
+      execute: async (a: Args) => {
         const action = a.action as string;
         if (!['list', 'add', 'complete', 'remove'].includes(action))
           return { success: false, error: 'action must be list, add, complete, or remove' };
@@ -63,19 +52,67 @@ export function createAgentTools(): Tool<Args>[] {
         return { success: true, output: 'Todo updated' };
       },
     },
-    {
+    ...(options.askUser ? [{
       name: 'ask_user',
       description:
-        'Ask the user a question and wait for their answer. Only use when blocked: ambiguity that would lead to materially different work, or a decision only the user can make.',
+        'Ask 1–4 structured questions when a decision materially changes the outcome and cannot be discovered from the repository. Not for permission, progress, or whether to proceed.',
       promptGuideline:
         'Do not ask for things you can discover by reading files or running commands, and do not ask for permission to proceed with what was already requested.',
-      shape: { question: 'string' },
-      execute: async (a, c) => {
-        if (!c.askUser)
-          return { success: false, error: 'User interaction is unavailable in this context' };
-        return { success: true, output: await c.askUser(a.question as string) };
+      shape: {},
+      parameters: {
+        type: 'object',
+        properties: {
+          questions: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 4,
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                header: { type: 'string' },
+                question: { type: 'string' },
+                multiSelect: { type: 'boolean' },
+                options: {
+                  type: 'array',
+                  minItems: 2,
+                  maxItems: 4,
+                  items: {
+                    type: 'object',
+                    properties: {
+                      label: { type: 'string' },
+                      description: { type: 'string' },
+                      recommended: { type: 'boolean' },
+                    },
+                    required: ['label', 'description'],
+                    additionalProperties: false,
+                  },
+                },
+              },
+              required: ['id', 'header', 'question', 'multiSelect', 'options'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['questions'],
+        additionalProperties: false,
       },
-    },
+      execute: async (a: Args) => {
+        const questions = a.questions;
+        if (
+          !Array.isArray(questions) ||
+          questions.length < 1 ||
+          questions.length > 4 ||
+          questions.some((q) => !isAskQuestion(q))
+        ) {
+          return { success: false, error: 'questions must contain 1–4 valid structured questions' };
+        }
+        return {
+          success: true,
+          output: JSON.stringify(await options.askUser!(questions as AskQuestion[])),
+        };
+      },
+    }] : []),
     {
       name: 'plan',
       description:
@@ -220,8 +257,8 @@ export function createAgentTools(): Tool<Args>[] {
       },
     },
   ];
-  return definitions.map(({ name, description, promptGuideline, shape, execute, arrayItems }) =>
-    tool(name, description, shape, execute, promptGuideline, arrayItems),
+  return definitions.map(({ name, description, promptGuideline, shape, execute, arrayItems, parameters }) =>
+    tool(name, description, shape, execute, promptGuideline, arrayItems, parameters),
   );
 }
 
@@ -232,12 +269,13 @@ function tool(
   execute: (args: Args, context: ToolContext) => Promise<ToolResult>,
   promptGuideline?: string,
   arrayItems?: Record<string, unknown>,
+  parameters?: Record<string, unknown>,
 ): Tool<Args> {
   return {
     name,
     description,
     ...(promptGuideline ? { promptSnippet: description, promptGuidelines: [promptGuideline] } : {}),
-    parameters: {
+    parameters: parameters ?? {
       type: 'object',
       properties: Object.fromEntries(
         Object.entries(shape).map(([k, type]) => [
@@ -252,9 +290,24 @@ function tool(
         .map(([k]) => k),
       additionalProperties: false,
     },
-    validate: (value): value is Args => validateArgs(value, shape, arrayItems),
+    validate: (value): value is Args => parameters
+      ? value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+      : validateArgs(value, shape, arrayItems),
     execute,
   };
+}
+
+function isAskQuestion(value: unknown): value is AskQuestion {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const q = value as Record<string, unknown>;
+  return typeof q.id === 'string' && typeof q.header === 'string' && typeof q.question === 'string' &&
+    typeof q.multiSelect === 'boolean' && Array.isArray(q.options) && q.options.length >= 2 && q.options.length <= 4 &&
+    q.options.every((option) => {
+      if (!option || typeof option !== 'object' || Array.isArray(option)) return false;
+      const o = option as Record<string, unknown>;
+      return typeof o.label === 'string' && typeof o.description === 'string' &&
+        (o.recommended === undefined || typeof o.recommended === 'boolean');
+    });
 }
 
 function validateArgs(

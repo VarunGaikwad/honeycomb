@@ -141,6 +141,27 @@ test('apply_patch undo restores agent changes and refuses to overwrite later edi
   });
 });
 
+test('ask_user is opt-in and validates structured questions before invoking the UI', async () => {
+  assert.equal(createAgentTools().some((tool) => tool.name === 'ask_user'), false);
+  let asked = false;
+  const askTool = createAgentTools({ askUser: async (questions) => {
+    asked = true;
+    assert.equal(questions.length, 1);
+    return { status: 'answered', answers: [{ id: 'animal', selected: ['Mammal'], customText: null }] };
+  } }).find((tool) => tool.name === 'ask_user')!;
+  assert.equal(askTool.validate?.({ questions: [] }), true);
+  const result = await askTool.execute({ questions: [] }, context('/tmp'));
+  assert.equal(result.success, false);
+  assert.equal(asked, false);
+  const valid = { questions: [{
+    id: 'animal', header: 'Animal', question: 'What kind?', multiSelect: false,
+    options: [{ label: 'Mammal', description: 'Warm-blooded' }, { label: 'Bird', description: 'Has feathers' }],
+  }] };
+  assert.equal(askTool.validate?.(valid), true);
+  assert.equal((await askTool.execute(valid, context('/tmp'))).success, true);
+  assert.equal(asked, true);
+});
+
 test('git tools invoke git safely in the configured working directory', async () => {
   await withTempDir(async (dir) => {
     await execFile('git', ['init', '-q'], { cwd: dir });
