@@ -144,9 +144,22 @@ async function resolvePath(context: ToolContext, input: string, allowMissing = f
     resolved = await fs.realpath(candidate);
   } catch (error) {
     if (!allowMissing || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    const parent = await fs.realpath(path.dirname(candidate));
-    if (!inside(root, parent)) throw new Error('Path is outside the working directory');
-    resolved = path.join(parent, path.basename(candidate));
+    let ancestor = path.dirname(candidate);
+    const suffix = [path.basename(candidate)];
+    while (true) {
+      try {
+        const realAncestor = await fs.realpath(ancestor);
+        if (!inside(root, realAncestor)) throw new Error('Path is outside the working directory');
+        resolved = path.join(realAncestor, ...suffix.reverse());
+        break;
+      } catch (ancestorError) {
+        if ((ancestorError as NodeJS.ErrnoException).code !== 'ENOENT') throw ancestorError;
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) throw new Error('No existing parent directory found');
+        suffix.push(path.basename(ancestor));
+        ancestor = parent;
+      }
+    }
   }
   if (!inside(root, resolved)) throw new Error('Path is outside the working directory');
   return resolved;

@@ -35,6 +35,14 @@ Inside pi:
 - `/init` — analyzes the codebase and generates/updates `AGENTS.md` at the project root
 - `session_start` notification confirms the extension loaded
 
+### Tool execution safety
+
+Shell, background, terminal, and code-execution tools require either an
+`allowCommand` policy supplied to `createExecutionTools()` or per-command
+approval through the tool context. Destructive filesystem and Git operations
+also require a UI approval callback; both kinds of operation are denied when
+the extension has no UI or configured policy.
+
 ### How `/init` works
 
 1. Checks `AGENTS.md` doesn't already exist (asks before overwriting)
@@ -60,6 +68,7 @@ for every run.
 ```bash
 npm install        # install dev deps (types, tooling)
 npm run typecheck  # type-check the extension
+npm test           # run tool-system tests (Node.js with TypeScript transform support)
 ```
 
 Host-provided packages (`@earendil-works/pi-coding-agent`, `typebox`, etc.)

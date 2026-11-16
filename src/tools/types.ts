@@ -3,6 +3,9 @@ export interface ToolContext {
   workingDirectory: string;
   signal?: AbortSignal;
   confirmDestructive?: (operation: string, target: string) => Promise<boolean>;
+  confirmCommand?: (command: string) => Promise<boolean>;
+  askUser?: (question: string) => Promise<string>;
+  delegateAgent?: (task: string) => Promise<string>;
 }
 
 export interface ToolResult {
@@ -16,6 +19,8 @@ export interface Tool<Args extends Record<string, unknown> = Record<string, unkn
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  promptSnippet?: string;
+  promptGuidelines?: string[];
   validate?: (args: unknown) => args is Args;
   execute(args: Args, context: ToolContext): Promise<ToolResult>;
 }
