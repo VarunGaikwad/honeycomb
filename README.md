@@ -6,24 +6,42 @@ A [Pi coding agent](https://pi.dev) extension package.
 
 ```
 bi/
-├── package.json                 # Pi manifest and package scripts
-├── tsconfig.json
+├── AGENTS.md                     # Coding-agent guidance
+├── package.json                  # Pi extension manifest and npm scripts
+├── package-lock.json             # Locked npm dependency versions
+├── .prettierrc                   # Formatting preferences
+├── tsconfig.json                 # TypeScript compiler configuration
+├── README.md                     # Usage and development documentation
 ├── src/
-│   ├── index.ts                 # Extension entry point
-│   ├── tui/                     # Branded interactive header and footer
-│   ├── extension/               # Pi runtime integration
-│   │   ├── index.ts             # Extension module exports
-│   │   ├── ask-user.ts          # Structured interactive prompts
-│   │   ├── quiet-startup.ts     # Project-local Pi setting
-│   │   └── register-tools.ts    # Tool registration and dispatch bridge
-│   ├── slash/                   # Slash commands and system prompt
-│   │   ├── index.ts             # Slash module exports
-│   │   ├── init.ts
-│   │   └── system-instruction.ts
-│   ├── tools/                   # Tool implementations, registry, and dispatcher
-│   └── types/                   # Shared/domain interfaces and type aliases
-├── tests/                       # Tool-system tests
-└── README.md
+│   ├── index.ts                  # Pi extension entry point
+│   ├── extension/                # Pi tool registration, prompts, and startup settings
+│   │   ├── ask-user.ts           # Structured UI question helper
+│   │   ├── index.ts              # Extension module exports
+│   │   ├── quiet-startup.ts      # Project-local quiet-startup setting
+│   │   └── register-tools.ts     # Bridges tool system into Pi's API
+│   ├── slash/                    # Slash commands and custom system prompt
+│   │   ├── index.ts              # Slash module exports
+│   │   ├── init.ts               # /init command
+│   │   └── system-instruction.ts # System prompt assembly
+│   ├── tools/                    # Tool implementations, registry, and dispatch
+│   │   ├── advanced.ts           # Advanced tools
+│   │   ├── agent.ts              # Agent interaction tools
+│   │   ├── dispatcher.ts         # Validates and executes tool calls
+│   │   ├── execution.ts          # Shell/process execution tools
+│   │   ├── filesystem.ts         # Filesystem tools
+│   │   ├── git.ts                # Git tools
+│   │   ├── index.ts              # Assembles and exports the tool system
+│   │   └── registry.ts           # Tool registration and lookup
+│   ├── tui/index.ts              # Branded TUI header and status footer
+│   └── types/                    # Shared tool and domain types
+│       ├── agent.ts
+│       ├── common.ts
+│       ├── execution.ts
+│       ├── index.ts
+│       └── tools.ts
+└── tests/                        # Node.js test-runner suites
+    ├── extension.test.ts         # Extension helper tests
+    └── tools.test.ts             # Tool registry, dispatcher, and tool tests
 ```
 
 Keep TypeScript source and test files below 1000 lines. Split files by responsibility
@@ -83,7 +101,8 @@ for every run.
 ```bash
 npm install        # install dev deps (types, tooling)
 npm run typecheck  # type-check the extension
-npm test           # run tool-system tests (Node.js with TypeScript transform support)
+npm test           # run all tests (Node.js with TypeScript transform support)
+node --experimental-transform-types --test tests/tools.test.ts # run one test file
 ```
 
 Host-provided packages (`@earendil-works/pi-coding-agent`, `typebox`, etc.)

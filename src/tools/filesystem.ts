@@ -1,33 +1,63 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Args, Tool, ToolContext } from '../types/index.ts';
+
+const DEFAULT_READ_LIMIT = 2_000;
+const MAX_READ_LINE_LENGTH = 2_000;
+const READ_LINE_TRUNCATION_MARKER = '... [truncated]';
+
+interface FileSnapshot {
+  size: number;
+  mtimeMs: number;
+  sha256: string;
+}
 
 /**
  * Creates the Phase 2 filesystem tools. All paths are relative to the active
  * working directory, and resolved paths (including symlinks) must stay inside it.
  */
 export function createFileSystemTools(): Tool<Args>[] {
+  const snapshots = new Map<string, Map<string, FileSnapshot>>();
   return [
-    tool('read', 'Read a UTF-8 text file', { path: 'string' }, async (a, c) =>
-      ({ success: true, output: await fs.readFile(await resolvePath(c, stringArg(a, 'path')), 'utf8') })),
+    tool('read', 'Read a UTF-8 text file by line range. offset is 1-indexed; limit defaults to 2,000 lines. Lines over 2,000 characters are marked and truncated.', {
+      path: 'string', offset: 'number?', limit: 'number?',
+    }, async (a, c) => {
+      const offset = a.offset === undefined ? 1 : a.offset as number;
+      const limit = a.limit === undefined ? DEFAULT_READ_LIMIT : a.limit as number;
+      if (!Number.isInteger(offset) || offset < 1) {
+        return { success: false, error: 'read: "offset" must be a positive integer (1-indexed)' };
+      }
+      if (!Number.isInteger(limit) || limit < 1) {
+        return { success: false, error: 'read: "limit" must be a positive integer' };
+      }
+      const file = await resolvePath(c, stringArg(a, 'path'));
+      const bytes = await fs.readFile(file);
+      const stat = await fs.stat(file);
+      const sessionSnapshots = snapshotsForSession(snapshots, c);
+      const text = bytes.toString('utf8');
+      const lines = splitReadLines(text);
+      const start = offset - 1;
+      if (start >= lines.length && (lines.length > 0 || a.offset !== undefined)) {
+        return { success: false, error: `read: offset ${offset} is beyond end of file (${lines.length} lines total)` };
+      }
+      const selected = lines.slice(start, start + limit);
+      let output = selected.map((line) => `${truncateReadLine(line.text)}${line.ending}`).join('');
+      const end = start + selected.length;
+      if (start > 0 || end < lines.length) {
+        const separator = output.endsWith('\n') || output.endsWith('\r') ? '\n' : '\n\n';
+        output += `${separator}Showing lines ${offset}-${end} of ${lines.length}...`;
+      }
+      sessionSnapshots.set(file, snapshot(stat, bytes));
+      return { success: true, output };
+    }),
     tool('write', 'Create or overwrite a UTF-8 text file', { path: 'string', content: 'string' }, async (a, c) => {
       const file = await resolvePath(c, stringArg(a, 'path'), true);
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(file, stringArg(a, 'content'), 'utf8');
       return { success: true, output: `Wrote ${file}` };
     }),
-    tool('edit', 'Replace one exact text occurrence in a file', { path: 'string', oldText: 'string', newText: 'string' }, async (a, c) => {
-      const file = await resolvePath(c, stringArg(a, 'path'));
-      const content = await fs.readFile(file, 'utf8');
-      const oldText = stringArg(a, 'oldText');
-      const first = content.indexOf(oldText);
-      if (first < 0) return { success: false, error: 'Text to replace was not found' };
-      if (content.indexOf(oldText, first + oldText.length) >= 0) {
-        return { success: false, error: 'Text occurs more than once; edit requires a unique match' };
-      }
-      await fs.writeFile(file, content.slice(0, first) + stringArg(a, 'newText') + content.slice(first + oldText.length), 'utf8');
-      return { success: true, output: `Edited ${file}` };
-    }),
+    createEditTool(snapshots),
     tool('ls', 'List directory entries', { path: 'string?' }, async (a, c) => {
       const dir = await resolvePath(c, optionalString(a, 'path') ?? '.');
       const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -95,6 +125,432 @@ export function createFileSystemTools(): Tool<Args>[] {
       return { success: true, output: `Copied ${source} to ${destination}` };
     }),
   ];
+}
+
+function createEditTool(snapshots: Map<string, Map<string, FileSnapshot>>): Tool<Args> {
+  return {
+    name: 'edit',
+    description: 'Replace exact text in a file that was read in this session. Read the file first; edits fail if it has not been read or has changed since reading. old_str must be unique unless replace_all is true; add more context if it is ambiguous. Use replace_all for intentional renames and edits for multiple non-overlapping changes in one file. Each edit matches the original file content. In mixed-ending files, inserted newlines use the first newline style found; untouched line endings are preserved.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        old_str: { type: 'string' },
+        new_str: { type: 'string' },
+        replace_all: { type: 'boolean', default: false },
+        edits: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            properties: {
+              old_str: { type: 'string' },
+              new_str: { type: 'string' },
+              replace_all: { type: 'boolean', default: false },
+            },
+            required: ['old_str', 'new_str'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    validate: (args): args is Args => {
+      if (!isRecord(args)) return false;
+      const normalized = normalizeLegacyParams(args);
+      if (!normalized.error) {
+        Object.assign(args, normalized.args);
+        delete args.oldText;
+        delete args.newText;
+      }
+      return true;
+    },
+    execute: (args, context) => executeEdit(args, context, snapshots),
+  };
+}
+
+interface TextEdit {
+  oldText: string;
+  newText: string;
+  replaceAll: boolean;
+}
+
+function normalizeLegacyParams(args: Args): { args: Args; error?: string } {
+  const hasLegacy = Object.hasOwn(args, 'oldText') || Object.hasOwn(args, 'newText');
+  if (!hasLegacy) return { args };
+  if (Object.hasOwn(args, 'old_str') || Object.hasOwn(args, 'new_str')) {
+    return { args, error: 'edit: do not mix legacy oldText/newText with old_str/new_str' };
+  }
+  const normalized: Args = { ...args, old_str: args.oldText, new_str: args.newText };
+  delete normalized.oldText;
+  delete normalized.newText;
+  return { args: normalized };
+}
+
+async function executeEdit(
+  input: Args,
+  context: ToolContext,
+  snapshots: Map<string, Map<string, FileSnapshot>>,
+) {
+  const normalized = normalizeLegacyParams(input);
+  if (normalized.error) return { success: false, error: normalized.error };
+  const args = normalized.args;
+  const inputPath = args.path;
+  if (typeof inputPath !== 'string' || inputPath.length === 0) {
+    return { success: false, error: 'edit: "path" must be a non-empty string' };
+  }
+  if (args.replace_all !== undefined && typeof args.replace_all !== 'boolean') {
+    return { success: false, error: 'edit: "replace_all" must be a boolean' };
+  }
+
+  const hasSingle = Object.hasOwn(args, 'old_str') || Object.hasOwn(args, 'new_str');
+  const hasEdits = Object.hasOwn(args, 'edits');
+  if (hasSingle && hasEdits) {
+    return { success: false, error: 'edit: provide either old_str/new_str or edits, not both' };
+  }
+  if (!hasSingle && !hasEdits) {
+    return { success: false, error: 'edit: provide old_str/new_str or a non-empty edits array' };
+  }
+
+  let edits: TextEdit[];
+  const defaultReplaceAll = args.replace_all === true;
+  if (hasEdits) {
+    if (!Array.isArray(args.edits)) return { success: false, error: 'edit: "edits" must be an array' };
+    if (args.edits.length === 0) return { success: false, error: 'edit: "edits" must not be empty' };
+    edits = [];
+    for (let index = 0; index < args.edits.length; index++) {
+      const item = args.edits[index];
+      if (!isRecord(item)) return editFailure(index, 'must be an object');
+      if (typeof item.old_str !== 'string' || typeof item.new_str !== 'string') {
+        return editFailure(index, 'must include string "old_str" and "new_str" values');
+      }
+      if (item.replace_all !== undefined && typeof item.replace_all !== 'boolean') {
+        return editFailure(index, '"replace_all" must be a boolean');
+      }
+      edits.push({
+        oldText: item.old_str,
+        newText: item.new_str,
+        replaceAll: item.replace_all === undefined ? defaultReplaceAll : item.replace_all,
+      });
+    }
+  } else {
+    if (typeof args.old_str !== 'string' || typeof args.new_str !== 'string') {
+      return { success: false, error: 'edit: old_str and new_str must both be strings' };
+    }
+    edits = [{ oldText: args.old_str, newText: args.new_str, replaceAll: defaultReplaceAll }];
+  }
+
+  let file: string;
+  try {
+    file = await resolvePath(context, inputPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { success: false, error: `edit: file not found: ${inputPath}` };
+    }
+    return { success: false, error: `edit: ${errorMessage(error)}` };
+  }
+
+  const sessionSnapshots = snapshotsForSession(snapshots, context);
+  const previousSnapshot = sessionSnapshots.get(file);
+  if (!previousSnapshot) {
+    return { success: false, error: `edit: ${inputPath} has not been read in this session` };
+  }
+
+  let stat;
+  let bytes: Buffer;
+  try {
+    stat = await fs.stat(file);
+    if (!stat.isFile()) return { success: false, error: `edit: ${inputPath} is not a regular file` };
+    bytes = await fs.readFile(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { success: false, error: `edit: file not found: ${inputPath}` };
+    }
+    return { success: false, error: `edit: cannot read ${inputPath}: ${errorMessage(error)}` };
+  }
+
+  if (stat.size !== previousSnapshot.size || stat.mtimeMs !== previousSnapshot.mtimeMs) {
+    const currentHash = sha256(bytes);
+    if (currentHash !== previousSnapshot.sha256) {
+      return { success: false, error: `edit: ${inputPath} has changed since it was read` };
+    }
+    sessionSnapshots.set(file, snapshot(stat, bytes));
+  }
+
+  const hasBom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  const textBytes = hasBom ? bytes.subarray(3) : bytes;
+  if (textBytes.includes(0)) return { success: false, error: `edit: ${inputPath} is a binary file` };
+  let original: string;
+  try {
+    original = new TextDecoder('utf-8', { fatal: true }).decode(textBytes);
+  } catch {
+    return { success: false, error: `edit: ${inputPath} is not valid UTF-8` };
+  }
+  if (/[\u0001-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(original)) {
+    return { success: false, error: `edit: ${inputPath} is a binary file` };
+  }
+
+  // For mixed-ending files, replacement snippets use the first newline sequence found.
+  // The original content is never normalized, so all untouched line endings stay unchanged.
+  const lineEnding = original.match(/\r\n|\n|\r/)?.[0] ?? '\n';
+  const replacements: Array<{ editIndex: number; start: number; end: number; text: string }> = [];
+  for (let index = 0; index < edits.length; index++) {
+    const edit = edits[index];
+    if (edit.oldText.length === 0) return editFailure(index, 'old_str must not be empty');
+    if (edit.oldText === edit.newText) return editFailure(index, 'old_str and new_str must be different');
+    const oldText = normalizeLineEndings(edit.oldText, lineEnding);
+    const newText = normalizeLineEndings(edit.newText, lineEnding);
+    if (oldText === newText) return editFailure(index, 'old_str and new_str must be different');
+    const positions = findOccurrences(original, oldText);
+    if (positions.length === 0) return editFailure(index, `old_str was not found in ${inputPath}`);
+    if (positions.length > 1 && !edit.replaceAll) {
+      const lineNumbers = positions.map((position) => lineNumberAt(original, position));
+      return editFailure(index,
+        `old_str matches ${positions.length} times on lines ${lineNumbers.join(', ')}; add more context or set replace_all to true`);
+    }
+    for (const start of edit.replaceAll ? positions : [positions[0]]) {
+      replacements.push({ editIndex: index, start, end: start + oldText.length, text: newText });
+    }
+  }
+
+  replacements.sort((a, b) => a.start - b.start || a.end - b.end);
+  let previous = replacements[0];
+  for (let index = 1; index < replacements.length; index++) {
+    const current = replacements[index];
+    if (current.start < previous.end) {
+      return {
+        success: false,
+        error: `edit: edit ${previous.editIndex + 1} overlaps edit ${current.editIndex + 1}; edits must target non-overlapping original text`,
+      };
+    }
+    if (current.end > previous.end) previous = current;
+  }
+
+  let updated = '';
+  let cursor = 0;
+  for (const replacement of replacements) {
+    updated += original.slice(cursor, replacement.start) + replacement.text;
+    cursor = replacement.end;
+  }
+  updated += original.slice(cursor);
+
+  const outputBytes = Buffer.concat([hasBom ? Buffer.from([0xef, 0xbb, 0xbf]) : Buffer.alloc(0), Buffer.from(updated, 'utf8')]);
+  try {
+    await atomicReplace(file, outputBytes, stat.mode);
+  } catch (error) {
+    return { success: false, error: `edit: could not write ${inputPath}: ${errorMessage(error)}` };
+  }
+  sessionSnapshots.set(file, snapshot(await fs.stat(file), outputBytes));
+
+  const diff = unifiedDiff(original, updated, inputPath);
+  return {
+    success: true,
+    output: `${replacements.length} replacement${replacements.length === 1 ? '' : 's'} in ${inputPath}\n${diff}`,
+  };
+}
+
+function editFailure(index: number, reason: string) {
+  return { success: false, error: `edit: edit ${index + 1} failed: ${reason}` };
+}
+
+function normalizeLineEndings(text: string, lineEnding: string): string {
+  return text.replace(/\r\n|\r|\n/g, lineEnding);
+}
+
+function findOccurrences(text: string, needle: string): number[] {
+  const positions: number[] = [];
+  let position = 0;
+  while ((position = text.indexOf(needle, position)) !== -1) {
+    positions.push(position);
+    position += needle.length;
+  }
+  return positions;
+}
+
+function lineNumberAt(text: string, position: number): number {
+  let line = 1;
+  for (let index = 0; index < position; index++) if (text[index] === '\n') line++;
+  return line;
+}
+
+async function atomicReplace(file: string, contents: Buffer, mode: number): Promise<void> {
+  const target = await fs.realpath(file);
+  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${randomUUID()}.tmp`);
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(temp, 'wx', mode & 0o7777);
+    await handle.writeFile(contents);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await fs.chmod(temp, mode & 0o7777);
+    await fs.rename(temp, target);
+  } catch (error) {
+    if (handle) await handle.close().catch(() => undefined);
+    await fs.rm(temp, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+interface DiffLine {
+  type: ' ' | '+' | '-';
+  text: string;
+}
+
+function unifiedDiff(before: string, after: string, filePath: string): string {
+  const oldLines = diffLines(before);
+  const newLines = diffLines(after);
+  const operations = lineDiff(oldLines, newLines);
+  const changed = operations.flatMap((operation, index) => operation.type === ' ' ? [] : [index]);
+  if (changed.length === 0) return `--- a/${filePath}\n+++ b/${filePath}\n(no textual diff)`;
+
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const index of changed) {
+    const start = Math.max(0, index - 3);
+    const end = Math.min(operations.length, index + 4);
+    const last = ranges[ranges.length - 1];
+    if (last && start <= last.end) last.end = Math.max(last.end, end);
+    else ranges.push({ start, end });
+  }
+
+  const output = [`--- a/${filePath}`, `+++ b/${filePath}`];
+  for (const range of ranges) {
+    const rangeOps = operations.slice(range.start, range.end);
+    const oldCount = rangeOps.filter((operation) => operation.type !== '+').length;
+    const newCount = rangeOps.filter((operation) => operation.type !== '-').length;
+    const oldBefore = operations.slice(0, range.start).filter((operation) => operation.type !== '+').length;
+    const newBefore = operations.slice(0, range.start).filter((operation) => operation.type !== '-').length;
+    const oldStart = oldBefore + (oldCount === 0 ? 0 : 1);
+    const newStart = newBefore + (newCount === 0 ? 0 : 1);
+    output.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`);
+    for (const operation of rangeOps) output.push(`${operation.type}${operation.text}`);
+  }
+
+  const maxLines = 100;
+  if (output.length > maxLines) return [...output.slice(0, maxLines), '... diff truncated ...'].join('\n');
+  const rendered = output.join('\n');
+  const maxCharacters = 12_000;
+  return rendered.length > maxCharacters
+    ? `${rendered.slice(0, maxCharacters)}\n... diff truncated ...`
+    : rendered;
+}
+
+function diffLines(text: string): string[] {
+  if (text.length === 0) return [];
+  const lines = text.replace(/\r\n|\r/g, '\n').split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+function lineDiff(oldLines: string[], newLines: string[]): DiffLine[] {
+  const oldLength = oldLines.length;
+  const newLength = newLines.length;
+  const width = newLength + 1;
+  if ((oldLength + 1) * width > 1_000_000) return coarseLineDiff(oldLines, newLines);
+  const table = new Uint32Array((oldLength + 1) * width);
+  for (let oldIndex = oldLength - 1; oldIndex >= 0; oldIndex--) {
+    for (let newIndex = newLength - 1; newIndex >= 0; newIndex--) {
+      const cell = oldIndex * width + newIndex;
+      table[cell] = oldLines[oldIndex] === newLines[newIndex]
+        ? table[(oldIndex + 1) * width + newIndex + 1] + 1
+        : Math.max(table[(oldIndex + 1) * width + newIndex], table[oldIndex * width + newIndex + 1]);
+    }
+  }
+
+  const operations: DiffLine[] = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+  while (oldIndex < oldLength && newIndex < newLength) {
+    if (oldLines[oldIndex] === newLines[newIndex]) {
+      operations.push({ type: ' ', text: oldLines[oldIndex++] });
+      newIndex++;
+    } else if (table[(oldIndex + 1) * width + newIndex] >= table[oldIndex * width + newIndex + 1]) {
+      operations.push({ type: '-', text: oldLines[oldIndex++] });
+    } else {
+      operations.push({ type: '+', text: newLines[newIndex++] });
+    }
+  }
+  while (oldIndex < oldLength) operations.push({ type: '-', text: oldLines[oldIndex++] });
+  while (newIndex < newLength) operations.push({ type: '+', text: newLines[newIndex++] });
+  return operations;
+}
+
+function coarseLineDiff(oldLines: string[], newLines: string[]): DiffLine[] {
+  let prefix = 0;
+  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < oldLines.length - prefix && suffix < newLines.length - prefix &&
+    oldLines[oldLines.length - suffix - 1] === newLines[newLines.length - suffix - 1]) suffix++;
+  return [
+    ...oldLines.slice(0, prefix).map((text): DiffLine => ({ type: ' ', text })),
+    ...oldLines.slice(prefix, oldLines.length - suffix).map((text): DiffLine => ({ type: '-', text })),
+    ...newLines.slice(prefix, newLines.length - suffix).map((text): DiffLine => ({ type: '+', text })),
+    ...oldLines.slice(oldLines.length - suffix).map((text): DiffLine => ({ type: ' ', text })),
+  ];
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function snapshotsForSession(
+  snapshots: Map<string, Map<string, FileSnapshot>>,
+  context: ToolContext,
+): Map<string, FileSnapshot> {
+  if (typeof context.sessionId !== 'string' || !context.sessionId) {
+    throw new Error('File tracking unavailable: Pi session ID is missing; refusing to use a tool-call ID');
+  }
+  let sessionSnapshots = snapshots.get(context.sessionId);
+  if (!sessionSnapshots) {
+    sessionSnapshots = new Map();
+    snapshots.set(context.sessionId, sessionSnapshots);
+  }
+  return sessionSnapshots;
+}
+
+function snapshot(stat: { size: number; mtimeMs: number }, bytes: Buffer): FileSnapshot {
+  return { size: stat.size, mtimeMs: stat.mtimeMs, sha256: sha256(bytes) };
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function splitReadLines(text: string): Array<{ text: string; ending: string }> {
+  const lines: Array<{ text: string; ending: string }> = [];
+  let start = 0;
+  for (let index = 0; index < text.length; index++) {
+    if (text[index] !== '\r' && text[index] !== '\n') continue;
+    const ending = text[index] === '\r' && text[index + 1] === '\n' ? '\r\n' : text[index];
+    lines.push({ text: text.slice(start, index), ending });
+    if (ending.length === 2) index++;
+    start = index + 1;
+  }
+  if (start < text.length) lines.push({ text: text.slice(start), ending: '' });
+  return lines;
+}
+
+function truncateReadLine(line: string): string {
+  let index = 0;
+  let characters = 0;
+  while (index < line.length && characters <= MAX_READ_LINE_LENGTH) {
+    const codePoint = line.codePointAt(index)!;
+    index += codePoint > 0xffff ? 2 : 1;
+    characters++;
+  }
+  if (characters <= MAX_READ_LINE_LENGTH) return line;
+
+  const markerLength = [...READ_LINE_TRUNCATION_MARKER].length;
+  const maxContentLength = MAX_READ_LINE_LENGTH - markerLength;
+  index = 0;
+  characters = 0;
+  while (index < line.length && characters < maxContentLength) {
+    const codePoint = line.codePointAt(index)!;
+    index += codePoint > 0xffff ? 2 : 1;
+    characters++;
+  }
+  return `${line.slice(0, index)}${READ_LINE_TRUNCATION_MARKER}`;
 }
 
 function tool(

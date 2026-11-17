@@ -8,10 +8,27 @@
     "pi-extension",
     "coding-agent"
   ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VarunGaikwad/bi.git"
+  },
+  "homepage": "https://github.com/VarunGaikwad/bi#readme",
+  "bugs": {
+    "url": "https://github.com/VarunGaikwad/bi/issues"
+  },
   "author": "Varun Gaikwad",
   "license": "ISC",
+  "files": [
+    "src/",
+    "README.md"
+  ],
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

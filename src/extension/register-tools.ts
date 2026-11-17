@@ -31,10 +31,21 @@ export function registerTools(pi: ExtensionAPI): void {
       ...(tool.promptSnippet ? { promptSnippet: tool.promptSnippet } : {}),
       ...(tool.promptGuidelines ? { promptGuidelines: tool.promptGuidelines } : {}),
       parameters: Type.Unsafe(tool.parameters as never),
-      async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         activeContext = ctx;
+        let sessionId: string;
+        try {
+          sessionId = actualSessionId(ctx);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            content: [{ type: 'text' as const, text: message }],
+            details: { success: false, errorCode: 'INTERNAL_ERROR' },
+            isError: true,
+          };
+        }
         const context: ToolContext = {
-          sessionId: toolCallId,
+          sessionId,
           workingDirectory: ctx.cwd,
           signal,
           confirmDestructive: async (operation, target) => {
@@ -58,4 +69,23 @@ export function registerTools(pi: ExtensionAPI): void {
       },
     });
   }
+}
+
+function actualSessionId(ctx: ExtensionContext): string {
+  const sessionManager = (ctx as ExtensionContext | undefined)?.sessionManager as
+    | { getSessionId?: () => unknown }
+    | undefined;
+  if (typeof sessionManager?.getSessionId !== 'function') {
+    throw new Error('File tracking unavailable: Pi session manager does not expose getSessionId()');
+  }
+  let sessionId: unknown;
+  try {
+    sessionId = sessionManager.getSessionId();
+  } catch {
+    throw new Error('File tracking unavailable: Pi session ID could not be obtained');
+  }
+  if (typeof sessionId !== 'string' || !sessionId) {
+    throw new Error('File tracking unavailable: Pi session ID is unavailable');
+  }
+  return sessionId;
 }

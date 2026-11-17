@@ -5,6 +5,7 @@ vendor/
 
 # Pi configuration
 .pi/
+.bi/
 
 # Environment variables
 .env
