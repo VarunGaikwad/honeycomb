@@ -1,0 +1,19 @@
+{
+  "filesystem": {
+    "defaultReadLimit": 2000,
+    "maxReadLineLength": 2000,
+    "maxGrepMatches": 1000
+  },
+  "git": {
+    "defaultLogLimit": 10
+  },
+  "output": {
+    "maxChars": 100000
+  },
+  "startup": {
+    "autoEnableQuietStartup": true
+  },
+  "systemPrompt": {
+    "additional": ""
+  }
+}

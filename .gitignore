@@ -3,9 +3,11 @@
 node_modules/
 vendor/
 
-# Pi configuration
-.pi/
-.bi/
+# Pi settings and bi runtime state
+.pi/*
+!.pi/config.json
+.bi/*
+!.bi/config.json
 
 # Environment variables
 .env

@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { BI_CONFIG } from '../config/index.ts';
+import { CONFIG_LIMITS } from '../config/limits.ts';
 import type { Args, Tool, ToolContext } from '../types/index.ts';
 
-const DEFAULT_READ_LIMIT = 2_000;
-const MAX_READ_LINE_LENGTH = 2_000;
 const READ_LINE_TRUNCATION_MARKER = '... [truncated]';
 
 interface FileSnapshot {
@@ -17,14 +17,34 @@ interface FileSnapshot {
  * Creates the Phase 2 filesystem tools. All paths are relative to the active
  * working directory, and resolved paths (including symlinks) must stay inside it.
  */
-export function createFileSystemTools(): Tool<Args>[] {
+export function createFileSystemTools(options: {
+  defaultReadLimit?: number;
+  maxReadLineLength?: number;
+  maxGrepMatches?: number;
+} = {}): Tool<Args>[] {
+  const defaultReadLimit = options.defaultReadLimit ?? BI_CONFIG.filesystem.defaultReadLimit;
+  const maxReadLineLength = options.maxReadLineLength ?? BI_CONFIG.filesystem.maxReadLineLength;
+  const maxGrepMatches = options.maxGrepMatches ?? BI_CONFIG.filesystem.maxGrepMatches;
+  if (!Number.isInteger(defaultReadLimit) || defaultReadLimit < 1 || defaultReadLimit > CONFIG_LIMITS.maxReadLimit) {
+    throw new Error(`filesystem.defaultReadLimit must be an integer from 1 to ${CONFIG_LIMITS.maxReadLimit}`);
+  }
+  if (!Number.isInteger(maxReadLineLength) || maxReadLineLength < READ_LINE_TRUNCATION_MARKER.length ||
+    maxReadLineLength > CONFIG_LIMITS.maxReadLineLength) {
+    throw new Error(`filesystem.maxReadLineLength must be an integer from ${READ_LINE_TRUNCATION_MARKER.length} to ${CONFIG_LIMITS.maxReadLineLength}`);
+  }
+  if (!Number.isInteger(maxGrepMatches) || maxGrepMatches < 1 || maxGrepMatches > CONFIG_LIMITS.maxGrepMatches) {
+    throw new Error(`filesystem.maxGrepMatches must be an integer from 1 to ${CONFIG_LIMITS.maxGrepMatches}`);
+  }
   const snapshots = new Map<string, Map<string, FileSnapshot>>();
   return [
-    tool('read', 'Read a UTF-8 text file by line range. offset is 1-indexed; limit defaults to 2,000 lines. Lines over 2,000 characters are marked and truncated.', {
+    tool('read', 'Read a UTF-8 text file by line range. offset is 1-indexed; the default limit and line truncation length come from configuration.', {
       path: 'string', offset: 'number?', limit: 'number?',
     }, async (a, c) => {
       const offset = a.offset === undefined ? 1 : a.offset as number;
-      const limit = a.limit === undefined ? DEFAULT_READ_LIMIT : a.limit as number;
+      const limit = a.limit === undefined
+        ? c.projectConfig?.filesystem?.defaultReadLimit ?? defaultReadLimit
+        : a.limit as number;
+      const lineLength = c.projectConfig?.filesystem?.maxReadLineLength ?? maxReadLineLength;
       if (!Number.isInteger(offset) || offset < 1) {
         return { success: false, error: 'read: "offset" must be a positive integer (1-indexed)' };
       }
@@ -42,7 +62,7 @@ export function createFileSystemTools(): Tool<Args>[] {
         return { success: false, error: `read: offset ${offset} is beyond end of file (${lines.length} lines total)` };
       }
       const selected = lines.slice(start, start + limit);
-      let output = selected.map((line) => `${truncateReadLine(line.text)}${line.ending}`).join('');
+      let output = selected.map((line) => `${truncateReadLine(line.text, lineLength)}${line.ending}`).join('');
       const end = start + selected.length;
       if (start > 0 || end < lines.length) {
         const separator = output.endsWith('\n') || output.endsWith('\r') ? '\n' : '\n\n';
@@ -77,26 +97,39 @@ export function createFileSystemTools(): Tool<Args>[] {
       await walk(root);
       return { success: true, output: matches.join('\n') };
     }),
-    tool('grep', 'Search text files for a literal string', { path: 'string?', query: 'string' }, async (a, c) => {
+    tool('grep', 'Search text files for a literal string; results are capped by configuration.', { path: 'string?', query: 'string' }, async (a, c) => {
       const root = await resolvePath(c, optionalString(a, 'path') ?? '.');
       const query = stringArg(a, 'query');
+      const maxMatches = c.projectConfig?.filesystem?.maxGrepMatches ?? maxGrepMatches;
       const matches: string[] = [];
+      let limitReached = false;
       const walk = async (dir: string): Promise<void> => {
         for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+          if (limitReached) return;
           const full = path.join(dir, entry.name);
           if (entry.isDirectory() && !entry.isSymbolicLink()) await walk(full);
           else if (entry.isFile()) {
             try {
               const text = await fs.readFile(full, 'utf8');
-              text.split('\n').forEach((line, i) => {
-                if (line.includes(query)) matches.push(`${path.relative(root, full)}:${i + 1}:${line}`);
-              });
+              const lines = text.split('\n');
+              for (let index = 0; index < lines.length; index++) {
+                if (!lines[index].includes(query)) continue;
+                matches.push(`${path.relative(root, full)}:${index + 1}:${lines[index]}`);
+                if (matches.length >= maxMatches) {
+                  limitReached = true;
+                  break;
+                }
+              }
             } catch { /* Ignore files that are not readable text. */ }
           }
         }
       };
       await walk(root);
-      return { success: true, output: matches.join('\n') };
+      const output = matches.join('\n');
+      return {
+        success: true,
+        output: limitReached ? `${output}\n... Search stopped at the configured limit of ${maxMatches} matches.` : output,
+      };
     }),
     tool('mkdir', 'Create a directory', { path: 'string' }, async (a, c) => {
       const dir = await resolvePath(c, stringArg(a, 'path'), true);
@@ -531,18 +564,18 @@ function splitReadLines(text: string): Array<{ text: string; ending: string }> {
   return lines;
 }
 
-function truncateReadLine(line: string): string {
+function truncateReadLine(line: string, maxLineLength: number): string {
   let index = 0;
   let characters = 0;
-  while (index < line.length && characters <= MAX_READ_LINE_LENGTH) {
+  while (index < line.length && characters <= maxLineLength) {
     const codePoint = line.codePointAt(index)!;
     index += codePoint > 0xffff ? 2 : 1;
     characters++;
   }
-  if (characters <= MAX_READ_LINE_LENGTH) return line;
+  if (characters <= maxLineLength) return line;
 
   const markerLength = [...READ_LINE_TRUNCATION_MARKER].length;
-  const maxContentLength = MAX_READ_LINE_LENGTH - markerLength;
+  const maxContentLength = maxLineLength - markerLength;
   index = 0;
   characters = 0;
   while (index < line.length && characters < maxContentLength) {

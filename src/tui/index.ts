@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { basename } from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { BI_CONFIG } from '../config/index.ts';
 import packageJson from '../../package.json' with { type: 'json' };
 
 const VERSION = packageJson.version;
@@ -40,14 +41,14 @@ const LOGO = ASCII
       '╚═════╝ ╚═╝',
     ];
 
-const COMMANDS: Array<[string, string]> = [['/init', 'set up project context']];
+const COMMANDS: Array<[string, string]> = BI_CONFIG.ui.commands.map(
+  ({ command, description }) => [command, description],
+);
 
 // Verify these against your pi version's keybindings.
-const KEYS: Array<[string, string]> = [
-  ['esc', 'interrupt'],
-  ['ctrl+l', 'switch model'],
-  ['shift+tab', 'thinking level'],
-];
+const KEYS: Array<[string, string]> = BI_CONFIG.ui.keys.map(
+  ({ key, description }) => [key, description],
+);
 
 function pad(s: string, w: number): string {
   const t = truncateToWidth(s, w);
@@ -88,18 +89,18 @@ function renderWide(width: number, theme: Theme): string[] {
   const left: string[] = [
     ...LOGO.map((l) => tintLogo(pad(l, logoW), theme)),
     '',
-    "Let's build something great",
+    BI_CONFIG.ui.tagline,
   ];
 
   // null = horizontal rule across the right panel.
   const right: (string | null)[] = [
-    theme.fg('accent', 'Getting started'),
-    theme.fg('dim', 'Describe a task in plain words.'),
+    theme.fg('accent', BI_CONFIG.ui.gettingStartedTitle),
+    theme.fg('dim', BI_CONFIG.ui.gettingStarted),
     null,
-    theme.fg('accent', 'Commands'),
+    theme.fg('accent', BI_CONFIG.ui.commandsTitle),
     ...COMMANDS.map(([c, d]) => kv(theme, c, d)),
     null,
-    theme.fg('accent', 'Keys'),
+    theme.fg('accent', BI_CONFIG.ui.keysTitle),
     ...KEYS.map(([k, d]) => kv(theme, k, d)),
   ];
 
@@ -138,7 +139,7 @@ function renderMedium(width: number, theme: Theme): string[] {
   return [
     '',
     b(G.tl + G.h) + t.text + b(G.h.repeat(Math.max(0, inner - 1 - t.w)) + G.tr),
-    line("Let's build something great"),
+    line(BI_CONFIG.ui.tagline),
     rule,
     line(COMMANDS.map(([c]) => theme.fg('accent', c)).join(dsep)),
     line(KEYS.map(([k, d]) => theme.fg('accent', k) + ' ' + theme.fg('dim', d)).join(dsep)),

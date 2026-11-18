@@ -85,7 +85,7 @@ function makeTool(
 
 async function stateDir(context: ToolContext, name: string): Promise<string> {
   const root = await fs.realpath(context.workingDirectory);
-  const dir = path.join(root, '.bi', name);
+  const dir = path.join(root, '.pi', name);
   const rel = path.relative(root, dir);
   if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid state directory');
   return dir;

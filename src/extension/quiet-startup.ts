@@ -1,8 +1,9 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-/** Preserve project settings while enabling Pi's quieter startup by default. */
-export async function ensureQuietStartup(cwd: string): Promise<void> {
+/** Preserve project settings while optionally enabling Pi's quieter startup by default. */
+export async function ensureQuietStartup(cwd: string, autoEnable = true): Promise<void> {
+  if (!autoEnable) return;
   const settingsDir = join(cwd, '.pi');
   const settingsPath = join(settingsDir, 'settings.json');
   let settings: Record<string, unknown> = {};

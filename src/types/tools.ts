@@ -1,6 +1,9 @@
+import type { ProjectConfig } from '../config/project.ts';
+
 export interface ToolContext {
   sessionId: string;
   workingDirectory: string;
+  projectConfig?: ProjectConfig;
   signal?: AbortSignal;
   confirmDestructive?: (operation: string, target: string) => Promise<boolean>;
   confirmCommand?: (command: string) => Promise<boolean>;

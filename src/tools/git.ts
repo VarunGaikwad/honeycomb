@@ -1,18 +1,25 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { BI_CONFIG } from '../config/index.ts';
 import type { Args, Tool, ToolContext, ToolResult } from '../types/index.ts';
 
 const execFileAsync = promisify(execFile);
 
 /** Git tools use execFile (never a shell) and run only in the active directory. */
-export function createGitTools(): Tool<Args>[] {
+export function createGitTools(options: { defaultLogLimit?: number } = {}): Tool<Args>[] {
+  const defaultLogLimit = options.defaultLogLimit ?? BI_CONFIG.git.defaultLogLimit;
+  if (!Number.isInteger(defaultLogLimit) || defaultLogLimit < 1 || defaultLogLimit > 100) {
+    throw new Error('git.defaultLogLimit must be an integer from 1 to 100');
+  }
   return [
     gitTool('git_status', 'Show working tree status', {}, async (_a, c) =>
       runGit(c, ['status', '--short', '--branch'])),
     gitTool('git_diff', 'Show working tree diff', { staged: 'boolean?' }, async (a, c) =>
       runGit(c, a.staged === true ? ['diff', '--cached'] : ['diff'])),
-    gitTool('git_log', 'Show recent commit history', { limit: 'number?' }, async (a, c) => {
-      const limit = a.limit === undefined ? 10 : a.limit as number;
+    gitTool('git_log', 'Show recent commit history; the default limit comes from configuration.', { limit: 'number?' }, async (a, c) => {
+      const limit = a.limit === undefined
+        ? c.projectConfig?.git?.defaultLogLimit ?? defaultLogLimit
+        : a.limit as number;
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
         return { success: false, error: 'limit must be an integer from 1 to 100' };
       }
