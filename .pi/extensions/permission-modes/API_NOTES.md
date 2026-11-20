@@ -33,6 +33,8 @@ isToolCallEventType(toolName: "ls", event: ToolCallEvent): event is LsToolCallEv
 
 There is also a generic overload for other tool names and input records. Pi 1.5.2's built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. The spec's read-only set (`read`, `grep`, `find`, `ls`) is present; `powershell` is not in that set and will be handled conservatively as an unknown tool.
 
+The installed tool declarations confirm these `tool_call` input fields: `bash`/`powershell` use `{ command, timeout? }`; `read` uses `{ path, offset?, limit? }`; `edit` uses `{ path, edits }`; `write` uses `{ path, content }`; `grep` uses `{ pattern, path?, glob?, ignoreCase?, literal?, context?, limit? }`; `find` uses `{ pattern, path?, limit? }`; and `ls` uses `{ path?, limit? }`. The adapter passes the event's `toolName` and record-valued `input` directly to the pure policy as `{ toolName, input }`; non-record inputs are blocked. These schema fields were verified in the installed package's `dist/core/tools/*.d.ts` declarations.
+
 ### Lifecycle, prompt, session state, and messages
 
 ```ts
@@ -69,7 +71,7 @@ registerFlag(name: string, options:
 getFlag(name: string): boolean | string | undefined;
 ```
 
-The installed `registerFlag` declaration supports `type: "string"`, and `getFlag` is documented. **UNVERIFIED:** the docs do not show the hyphenated string flag spelling (`--permission-mode`) or explicitly demonstrate reading a string-valued flag in `session_start`; that behavior is inferred from the string flag type, `getFlag`, and the documented boolean example. Command argument completion is documented and can be used for mode names.
+The installed `registerFlag` declaration supports `type: "string"`, and `getFlag` is documented. The installed 1.5.2 CLI parser/runtime was also checked: extension flag names are exposed verbatim as `--<name>`, and string values for registered extension flags are made available to `getFlag`. Thus `registerFlag("permission-mode", { type: "string" })` supports `--permission-mode <mode>` and reading it during `session_start`. Command argument completion is documented and can be used for mode names.
 
 `shift+tab` is Pi's default `app.thinking.cycle` binding. Use **`alt+m`** for the mode-cycle shortcut; it is not listed among default bindings in the installed keybindings reference. **UNVERIFIED:** a user's custom keybindings could assign `alt+m` and cause a conflict.
 
