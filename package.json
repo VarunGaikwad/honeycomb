@@ -23,11 +23,15 @@
   "license": "ISC",
   "files": [
     "src/",
+    "themes/",
     "README.md"
   ],
   "pi": {
     "extensions": [
       "./src/index.ts"
+    ],
+    "themes": [
+      "./themes/*.json"
     ]
   },
   "scripts": {

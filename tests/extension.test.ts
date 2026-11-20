@@ -8,7 +8,7 @@ import { BI_CONFIG } from '../src/config/index.ts';
 import { loadProjectConfig } from '../src/config/project.ts';
 import { askQuestion } from '../src/extension/ask-user.ts';
 import { ensureQuietStartup } from '../src/extension/quiet-startup.ts';
-import { registerSystemInstruction } from '../src/slash/system-instruction.ts';
+import { registerSystemInstruction } from '../src/extension/system-instruction.ts';
 import extension from '../src/index.ts';
 import { installTui } from '../src/tui/index.ts';
 import type { AskQuestion } from '../src/types/index.ts';

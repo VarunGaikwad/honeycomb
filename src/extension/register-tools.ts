@@ -26,7 +26,7 @@ export function registerTools(pi: ExtensionAPI): void {
   for (const tool of registry.list()) {
     pi.registerTool({
       name: tool.name,
-      label: tool.name,
+      label: `🔧 ${tool.name}`,
       description: tool.description,
       ...(tool.promptSnippet ? { promptSnippet: tool.promptSnippet } : {}),
       ...(tool.promptGuidelines ? { promptGuidelines: tool.promptGuidelines } : {}),

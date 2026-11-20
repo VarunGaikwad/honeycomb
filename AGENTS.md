@@ -16,7 +16,7 @@ Run repository commands from the project root. Node.js `>=22.19.0` is required b
 ## Architecture
 - `src/index.ts` registers the extension's tools, `/init` slash command, custom system instruction, and session-start behavior (TUI installation and project-local quiet-startup setting).
 - `src/tools/` implements filesystem, execution, Git, agent, and advanced tools. `createToolSystem()` gathers them into a registry; `ToolDispatcher` validates calls, executes them, and normalizes errors/results. `src/extension/register-tools.ts` adapts registry entries to Pi's tool API and supplies UI approval/context.
-- `src/slash/` contains slash-command and system-instruction integration; `src/tui/` contains the branded TUI integration; `src/types/` provides shared types.
+- `src/commands/` contains slash-command integrations; `src/tui/` contains the branded TUI integration; `src/types/` provides shared types.
 - `tests/` covers the tool system and extension helpers using Node's test runner.
 
 ## Conventions

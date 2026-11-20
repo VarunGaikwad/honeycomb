@@ -19,11 +19,11 @@ bi/
 │   │   ├── ask-user.ts           # Structured UI question helper
 │   │   ├── index.ts              # Extension module exports
 │   │   ├── quiet-startup.ts      # Project-local quiet-startup setting
-│   │   └── register-tools.ts     # Bridges tool system into Pi's API
-│   ├── slash/                    # Slash commands and custom system prompt
-│   │   ├── index.ts              # Slash module exports
-│   │   ├── init.ts               # /init command
+│   │   ├── register-tools.ts     # Bridges tool system into Pi's API
 │   │   └── system-instruction.ts # System prompt assembly
+│   ├── commands/                 # Slash commands
+│   │   ├── index.ts              # Slash module exports
+│   │   └── init.ts               # /init command
 │   ├── tools/                    # Tool implementations, registry, and dispatch
 │   │   ├── advanced.ts           # Advanced tools
 │   │   ├── agent.ts              # Agent interaction tools
@@ -65,9 +65,29 @@ cp -r . ~/.pi/agent/extensions/bi
 Inside pi:
 
 - `/init` — analyzes the codebase and generates/updates `AGENTS.md` at the project root
+- `/goal <objective>` — starts a persistent goal with a bounded automatic continuation loop
+- `/goal` or `/goal status` — show the saved goal and its progress
+- `/goal pause`, `/goal resume`, `/goal clear` — manage the current goal
+- `/goal edit <objective>`, `/goal budget <1-50>` — update the objective or iteration limit
+- `/review` — reviews the current changes
+- `/simplify` — looks for opportunities to simplify code
 - `session_start` notification confirms the extension loaded
 - Interactive mode uses a compact branded header and a footer with the current
   project, model, and Git branch; other modes are unchanged
+- Includes the `bi` dark theme: user messages have a teal background, while AI
+  responses use the theme's standard text color. Select it with `/settings` →
+  **Theme** → `bi` (or start Pi with `--use-theme bi`).
+
+Goal state is stored in the current Pi session transcript, so it survives session
+resume and follows session branches. Active goals continue through Pi's
+`agent_before_settle` lifecycle hook, up to 8 automatic iterations by default
+(configurable with `/goal budget`). `/goal resume` grants another bounded run
+after budget exhaustion. Pressing Escape pauses the goal; use `/goal resume` to
+continue. Each turn must send exactly one `goal_report`; missing or duplicate
+reports stop the loop. When blocked, the agent should ask one focused question
+rather than guess. bi relies on the agent's report and verification evidence for
+completion/blocker decisions; this is not an independent verifier, and it does
+not guarantee a goal will finish within the iteration budget.
 
 ### Tool execution safety
 
@@ -140,7 +160,7 @@ replaced via a `before_agent_start` handler that returns the complete prompt
 for every run.
 
 - Edit `systemPrompt.core` in `src/config/bi.config.json` to change bi's identity and workflow rules
-- The builder in `src/slash/system-instruction.ts` re-embeds what pi's default prompt would have provided: tool
+- The builder in `src/extension/system-instruction.ts` re-embeds what pi's default prompt would have provided: tool
   guidance (`toolSnippets`/`toolGuidelines`), context files (`AGENTS.md`
   content), skills, custom sections, and `--append-system-prompt`
 - User-supplied `--system-prompt` / `SYSTEM.md` prefixes are kept in front
