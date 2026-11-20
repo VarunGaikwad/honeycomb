@@ -6,6 +6,9 @@ vendor/
 # Pi settings and bi runtime state
 .pi/*
 !.pi/config.json
+!.pi/extensions/
+.pi/extensions/*
+!.pi/extensions/permission-modes/
 .bi/*
 !.bi/config.json
 
