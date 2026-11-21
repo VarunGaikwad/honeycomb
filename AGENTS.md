@@ -1,31 +1,32 @@
 # Agent guide
 
 ## Overview
-- `bi` is a Pi coding-agent extension package, written in TypeScript/ES modules and integrated with `@earendil-works/pi-coding-agent` and TypeBox.
-- Pi loads `src/index.ts` via the `pi.extensions` manifest in `package.json`.
+- `bi` extends the Pi coding agent with tools, slash commands, a custom system prompt, and a TUI. It uses TypeScript ES modules and TypeBox. Pi loads `src/index.ts` directly and discovers `themes/*.json` through `package.json`.
 
 ## Commands
-Run repository commands from the project root. Node.js `>=22.19.0` is required by `package.json` and the locked Pi dependency.
-- Install development dependencies: `npm install` (documented in README; not run during this analysis).
-- Use locally for a Pi session: `pi -e ./`; install the extension with Pi: `pi install ./` (requires Pi; not run).
-- Tests: `npm test`; single test file: `node --experimental-transform-types --test tests/tools.test.ts` (or substitute `tests/extension.test.ts`). These use built-in Node test runner and TypeScript transform support.
-- Typecheck: `npm run typecheck` (`tsc --noEmit`).
-- No build, development-server, lint, or format npm scripts are defined. No CI workflows, Makefile/justfile, docs directory, or contribution guide were found.
-- Verified locally: `npm test` passed (18 tests) and `npm run typecheck` passed. Install and Pi-specific commands were not run.
+Run these local commands from the repository root with Node.js >=22.19.0. Pi supplies the optional runtime peers; local checks use the dev dependencies.
+
+| Task | Command | Verification |
+| --- | --- | --- |
+| Install dev dependencies | `npm install` | Documented; not run |
+| Try one session / install into Pi | `pi -e ./` / `pi install ./` | Requires Pi; not run |
+| Typecheck `src/` (not tests) | `npm run typecheck` | Passed (`tsc --noEmit`) |
+| Run all `tests/*.test.ts` | `npm test` | Configured; not run (includes filesystem and Git fixtures) |
+| Run one suite | `node --experimental-transform-types --test tests/goal.test.ts` | Passed; substitute another test file to change suites |
+
+- No build, dev-server, lint, or format script is defined. `.prettierrc` records formatting preferences. No CI workflow defines additional commands.
 
 ## Architecture
-- `src/index.ts` registers the extension's tools, `/init` slash command, custom system instruction, and session-start behavior (TUI installation and project-local quiet-startup setting).
-- `src/tools/` implements filesystem, execution, Git, agent, and advanced tools. `createToolSystem()` gathers them into a registry; `ToolDispatcher` validates calls, executes them, and normalizes errors/results. `src/extension/register-tools.ts` adapts registry entries to Pi's tool API and supplies UI approval/context.
-- `src/commands/` contains slash-command integrations; `src/tui/` contains the branded TUI integration; `src/types/` provides shared types.
-- `tests/` covers the tool system and extension helpers using Node's test runner.
+- `src/index.ts` wires tools, the prompt, `/init`, `/review`, `/simplify`, and `/goal` into Pi. On session start it installs the header/footer in TUI mode and initializes project configuration.
+- `createToolSystem()` in `src/tools/index.ts` assembles enabled tool groups into a registry. `src/extension/register-tools.ts` bridges Pi calls and UI callbacks to `ToolDispatcher`, which validates arguments, handles cancellation, and normalizes results.
+- Edit `src/config/bi.config.json` for package defaults (including tool groups, limits, UI copy, and core instructions). `src/extension/system-instruction.ts` rebuilds the prompt before each run, retaining Pi context and appending project instructions only for trusted projects.
+- `src/commands/goal/` stores goal state on the current session branch. The `agent_before_settle` hook decides whether to continue within the iteration budget; an active turn requires exactly one `goal_report`.
 
 ## Conventions
-- Keep TypeScript source and test files under 1000 lines; split responsibilities before approaching that limit (README guidance).
-- Use strict TypeScript (`tsconfig.json`); formatting settings are in `.prettierrc`, but no formatter command or dependency is configured.
-- Tool execution must retain dispatcher validation/cancellation and the execution/extension approval boundaries. Without UI or configured policy, potentially dangerous shell and destructive filesystem/Git actions are denied.
+- Keep TypeScript source and test files under 1000 lines; split by responsibility before approaching the limit.
+- Keep authorization in TypeScript: execution requires a command policy or per-command approval; destructive filesystem and Git operations require approval. Project config must not bypass these checks.
 
 ## Gotchas
-- Pi packages are optional peer dependencies at runtime; Pi supplies them. They are also dev dependencies for local typechecking/tests.
-- Tests use Node's `--experimental-transform-types`; Node may print its experimental-feature warning.
-- `/init` prompts the agent to generate the current project's root `AGENTS.md`; review generated changes carefully. The command checks for existing instructions and requests confirmation before overwriting when UI is available.
-- `ensureQuietStartup` manages `.pi/settings.json` under the active project, preserving explicit settings. No `.env.example` or required environment variable/service setup was found.
+- Session startup creates `.pi/config.json` only if missing. Project overrides are allowlisted; tool preferences are reread per call. Quiet startup may update `.pi/settings.json` but preserves explicit settings.
+- `/init` sends an editing prompt rather than writing a template. It requires an idle agent and confirms regeneration of existing root guidance when a UI is available.
+- README mentions a `bi` theme, but none of the theme files declared by the current manifest has that name.

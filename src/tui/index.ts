@@ -253,7 +253,7 @@ function fitJoin(parts: Part[], width: number, dsep: string): string {
  * getThinkingLevel (optional) is the live source, e.g. () => pi.getThinkingLevel().
  * Without it the footer falls back to the last thinking_level_change entry in the session.
  */
-export function installTui(ctx: ExtensionContext, getThinkingLevel?: () => string | undefined): void {
+export function installTui(ctx: ExtensionContext, getThinkingLevel?: () => string | undefined, permissionModes?: { readonly label: string; subscribe(fn: () => void): () => void }): void {
   ctx.ui.setHeader((_tui, theme) => ({
     render(width: number): string[] {
       if (width >= WIDE_MIN) return renderWide(width, theme);
@@ -265,6 +265,7 @@ export function installTui(ctx: ExtensionContext, getThinkingLevel?: () => strin
   }));
 
   ctx.ui.setFooter((tui, theme, footerData) => {
+    const unsubscribeMode = permissionModes?.subscribe(() => tui.requestRender());
     // git dirty flag: polled async. A sync execSync inside render() would block the
     // TUI on every repaint (render fires constantly while streaming).
     let dirty = false;
@@ -299,6 +300,7 @@ export function installTui(ctx: ExtensionContext, getThinkingLevel?: () => strin
       dispose() {
         clearInterval(tick);
         unsubscribe();
+        unsubscribeMode?.();
       },
       invalidate() {},
       render(width: number): string[] {
@@ -353,14 +355,15 @@ export function installTui(ctx: ExtensionContext, getThinkingLevel?: () => strin
 
         // Display order = Claude Code order. p = drop priority when narrow (lowest goes first).
         const parts: Part[] = [
+          ...(permissionModes ? [{ s: width < 18 ? permissionModes.label : `Mode: ${permissionModes.label}`, p: 100 }] : []),
           { s: modelPart, p: 8 },
           ...(size ? [{ s: ctxPart, p: 6 }] : []),
           { s: promptPart, p: 1 },
           { s: gitPart, p: 5 },
-          { s: tokensPart, p: 4 },
-          { s: cachePart, p: 3 },
+          { s: tokensPart, p: 0 },
+          { s: cachePart, p: 0 },
           { s: timePart, p: 2 },
-          { s: costPart, p: 7 },
+          { s: costPart, p: 0 },
         ];
         // Only shown once more than one model has been used on this branch.
         if (s.models.length > 1) {

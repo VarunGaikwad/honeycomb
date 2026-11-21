@@ -36,7 +36,8 @@
     "keys": [
       { "key": "esc", "description": "interrupt" },
       { "key": "ctrl+l", "description": "switch model" },
-      { "key": "shift+tab", "description": "thinking level" }
+      { "key": "shift+tab", "description": "thinking level" },
+      { "key": "alt+m", "description": "cycle permission mode" }
     ]
   },
   "systemPrompt": {

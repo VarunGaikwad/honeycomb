@@ -74,9 +74,8 @@ Inside pi:
 - `session_start` notification confirms the extension loaded
 - Interactive mode uses a compact branded header and a footer with the current
   project, model, and Git branch; other modes are unchanged
-- Includes the `bi` dark theme: user messages have a teal background, while AI
-  responses use the theme's standard text color. Select it with `/settings` →
-  **Theme** → `bi` (or start Pi with `--use-theme bi`).
+- Select a bundled theme in `/settings` → **Theme**: `catppuccin-mocha`,
+  `github-dark`, `tokyo-day`, `tokyo-night`, `vercel-black`, or `vercel-light`.
 
 Goal state is stored in the current Pi session transcript, so it survives session
 resume and follows session branches. Active goals continue through Pi's
@@ -152,6 +151,31 @@ in TypeScript. Use TypeScript to change how a tool works or add a new tool.
    (docs, manifests, directory structure) and write a concise `AGENTS.md`
    with overview, build/test/lint commands, architecture notes, and code style
 3. The agent runs with its normal tools (read, edit, write) to produce the file
+
+## Permission modes
+
+The footer shows the current mode. Press **Alt+M** to cycle Manual → Edits → Plan → Auto → Manual. Shift+Tab still changes the thinking level. Modes are saved on the current session branch and take effect for the next tool call.
+
+| Mode | Behavior |
+| --- | --- |
+| Manual (`default`) | Ordinary reads pass the mode gate; edits and uncertain calls require approval. |
+| Edits (`acceptEdits`) | Also permits ordinary project edits after path checks. Outside and sensitive paths require approval. |
+| Plan (`plan`) | Restricts the active tools to investigation and session bookkeeping. `plan_note` writes only `.pi/plans/<session-id>.md`; after a change, choose whether to start in Edits or Manual, keep planning, or discard the note. |
+| Auto (`auto`) | Uses the Edits rules. With no configured reviewer it falls back to asking; the injectable reviewer receives only a safe summary and times out after 15 seconds. |
+| No prompts (`dontAsk`) | Declines calls whenever either the mode gate or a bi tool requires confirmation. Launch only with `--permission-mode dontAsk`. |
+| Bypass (`bypassPermissions`) | Skips routine mode prompts for eligible calls, after interactive confirmation at launch with `--permission-mode bypassPermissions`. |
+
+The last two modes are not in the shortcut cycle. Bypass cannot be restored from a transcript without the launch flag and confirmation. An approval can be granted once or, for eligible file calls, for that exact call during the session. Explicit ask and deny rules always take precedence.
+
+Optional trusted user settings live in `~/.pi/agent/permission-modes.json`. For example:
+
+```json
+{ "defaultMode": "acceptEdits", "ask": ["write:docs/*"], "deny": ["read:.env*"] }
+```
+
+Rules use `tool:pattern`, where `*` and `?` are glob characters. User settings may also contain `allow`; project `.pi/permission-modes.json` can contain only `ask` and `deny`. Invalid configuration blocks tool calls until corrected. These files are separate from `.pi/config.json`.
+
+The mode gate is a tool-call filter, not an operating-system sandbox. It blocks protected paths and recognized critical operations, but cannot inspect all effects of an approved command, script, external tool, or a process already running. bi's own command and destructive-operation confirmations still apply after the mode gate, including in Bypass. Auto ships without a network reviewer and asks when its static policy cannot decide.
 
 ## System prompt
 

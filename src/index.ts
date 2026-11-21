@@ -9,20 +9,22 @@ import {
   registerSimplifyCommand,
 } from './commands/index.ts';
 import { installTui } from './tui/index.ts';
+import { createPermissionModes } from './extension/permission-modes/index.ts';
 
 // Pi extension entry point.
 // Loaded via the "pi.extensions" manifest in package.json.
 // Test with: pi -e ./
 export default function (pi: ExtensionAPI) {
-  registerTools(pi);
-  registerSystemInstruction(pi);
+  const permissionModes = createPermissionModes(pi);
+  registerTools(pi, permissionModes);
+  registerSystemInstruction(pi, permissionModes);
   registerInitCommand(pi);
   registerGoalCommand(pi);
   registerReviewCommand(pi);
   registerSimplifyCommand(pi);
 
   pi.on('session_start', async (_event, ctx) => {
-    if (ctx.mode === 'tui') installTui(ctx);
+    if (ctx.mode === 'tui') installTui(ctx, undefined, permissionModes);
     await ensureProjectConfig(ctx.cwd);
     const projectConfig = await loadProjectConfig(ctx.cwd);
     await ensureQuietStartup(

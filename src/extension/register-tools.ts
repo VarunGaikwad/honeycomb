@@ -3,8 +3,9 @@ import { Type } from 'typebox';
 import { askQuestion } from './ask-user.ts';
 import { createToolSystem } from '../tools/index.ts';
 import type { AskResult, ToolContext } from '../types/index.ts';
+import type { PermissionController } from './permission-modes/index.ts';
 
-export function registerTools(pi: ExtensionAPI): void {
+export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionController): void {
   // Pi supplies the UI context only while executing a tool. Keep the callback
   // injected at registration and bind the current context immediately before dispatch.
   let activeContext: ExtensionContext | undefined;
@@ -49,12 +50,12 @@ export function registerTools(pi: ExtensionAPI): void {
           workingDirectory: ctx.cwd,
           signal,
           confirmDestructive: async (operation, target) => {
-            if (!ctx.hasUI) return false;
-            return ctx.ui.confirm(`Confirm ${operation}`, target);
+            if (!ctx.hasUI || permissionModes?.mode === 'dontAsk') return false;
+            try { return await ctx.ui.confirm(`Confirm ${operation}`, target); } catch { return false; }
           },
           confirmCommand: async (command) => {
-            if (!ctx.hasUI) return false;
-            return ctx.ui.confirm('Run shell command?', command);
+            if (!ctx.hasUI || permissionModes?.mode === 'dontAsk') return false;
+            try { return await ctx.ui.confirm('Run shell command?', command); } catch { return false; }
           },
         };
         const result = await dispatcher.dispatch(

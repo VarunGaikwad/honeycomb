@@ -143,6 +143,7 @@ test('session startup creates project config and default settings', async () => 
   try {
     const handlers = new Map<string, (...args: any[]) => unknown>();
     extension({
+      registerShortcut: () => {},
       registerTool: () => {},
       registerCommand: () => {},
       on: (event: string, handler: (...args: any[]) => unknown) => { handlers.set(event, handler); },
@@ -177,6 +178,7 @@ test('session startup notification comes from configuration', async () => {
     }));
     const handlers = new Map<string, (...args: any[]) => unknown>();
     extension({
+      registerShortcut: () => {},
       registerTool: () => {},
       registerCommand: () => {},
       on: (event: string, handler: (...args: any[]) => unknown) => { handlers.set(event, handler); },

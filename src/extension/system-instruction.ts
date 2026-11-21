@@ -4,6 +4,7 @@ import type {
 } from '@earendil-works/pi-coding-agent';
 import { BI_CONFIG } from '../config/index.ts';
 import { loadProjectConfig } from '../config/project.ts';
+import type { PermissionController } from './permission-modes/index.ts';
 
 function buildBiSystemPrompt(
   options: NormalizedBuildSystemPromptOptions,
@@ -56,13 +57,14 @@ function buildBiSystemPrompt(
   return parts.join('\n\n');
 }
 
-export function registerSystemInstruction(pi: ExtensionAPI) {
+export function registerSystemInstruction(pi: ExtensionAPI, permissionModes?: PermissionController) {
   pi.on('before_agent_start', async (event, ctx) => {
     // Project config is repository content. Only inject its prompt when Pi marks
     // the current project as trusted; the core bi prompt always stays in place.
     const projectInstructions = ctx.isProjectTrusted()
       ? (await loadProjectConfig(event.systemPromptOptions.cwd)).systemPrompt?.additional
       : undefined;
-    return { systemPrompt: buildBiSystemPrompt(event.systemPromptOptions, projectInstructions) };
+    const instruction = permissionModes ? `\n\nCurrent permission mode: ${permissionModes.label}. ${permissionModes.mode === 'plan' ? 'Investigate without changing project files. Use plan_note for the current session plan; implementation requires explicit approval.' : 'Tool calls are subject to the current permission gate and existing tool safety checks.'}` : '';
+    return { systemPrompt: buildBiSystemPrompt(event.systemPromptOptions, projectInstructions) + instruction };
   });
 }
