@@ -443,11 +443,6 @@ function isWriteTool(call: ToolCall): boolean {
   return WRITE_TOOLS.has(call.toolName);
 }
 
-function isPlanFileWrite(call: ToolCall, ctx: PolicyCtx): boolean {
-  if (!isWriteTool(call) || typeof call.input.path !== "string") return false;
-  return isInsideCwd(call.input.path, ctx.cwd) && isSameRealPath(call.input.path, ctx.planFilePath, ctx.cwd);
-}
-
 function fileWriteInsideCwd(call: ToolCall, ctx: PolicyCtx): boolean {
   return typeof call.input.path === "string" && isInsideCwd(call.input.path, ctx.cwd);
 }
@@ -471,10 +466,7 @@ function modeDecision(mode: Mode, call: ToolCall, ctx: PolicyCtx): Verdict {
         return fileWriteInsideCwd(call, ctx)
           ? verdict("allow", "Edit is inside the working directory.")
           : verdict("ask", "Edit is outside the working directory.");
-      case "plan":
-        return isPlanFileWrite(call, ctx)
-          ? verdict("allow", "Only the active plan file may be written in plan mode.")
-          : verdict("deny", "Plan mode denies edits outside the active plan file.");
+      case "plan": return verdict("deny", "Plan mode denies general file-editing tools.");
       case "auto":
         return fileWriteInsideCwd(call, ctx)
           ? verdict("allow", "Edit is inside the working directory.")
@@ -497,10 +489,7 @@ function modeDecision(mode: Mode, call: ToolCall, ctx: PolicyCtx): Verdict {
           return verdict("allow", "Filesystem-safe bash paths are inside the working directory.");
         }
         return verdict("ask", "Bash command or path requires approval.");
-      case "plan":
-        return bash.classification === "readonly"
-          ? verdict("allow", "Allowlisted read-only bash command in plan mode.")
-          : verdict("deny", "Plan mode allows only read-only bash commands.");
+      case "plan": return verdict("deny", "Plan mode denies all bash commands.");
       case "auto":
         if (bash.classification === "readonly") return verdict("allow", "Allowlisted read-only bash command.");
         if (bash.classification === "fs-safe" && fsSafePathsInsideCwd(bash.pathArgs, ctx)) {
@@ -536,6 +525,18 @@ export function decide(mode: Mode, call: ToolCall, ctx: PolicyCtx): Verdict {
   const hardDenyReason = hardDeny(call, ctx);
   if (hardDenyReason) return verdict("deny", hardDenyReason, "hard-deny");
 
+  if (call.toolName === "save_plan") {
+    return mode === "plan"
+      ? verdict("allow", "The extension-owned plan saver is allowed in plan mode.")
+      : verdict("deny", "Plan saving is only allowed in plan mode.");
+  }
+
+  // Plan mode never exposes general write tools, shells, or unrecognized tools.
+  // Deny before ask/allow rules so approval cannot override these restrictions.
+  if (mode === "plan" && !READ_TOOLS.has(call.toolName)) {
+    return verdict("deny", `Plan mode denies general write, execution, and unrecognized tool "${call.toolName}".`);
+  }
+
   if (mode === "bypassPermissions" && !ctx.bypassEnabled) {
     return verdict("deny", "bypassPermissions was not enabled when this session started.");
   }
@@ -557,9 +558,9 @@ export function decide(mode: Mode, call: ToolCall, ctx: PolicyCtx): Verdict {
   }
 
   if (ruleAction === "allow") {
-    if (mode !== "plan" || !isWriteTool(call) || isPlanFileWrite(call, ctx)) {
-      return verdict("allow", "A user allow-rule matched this call.", "user-allow");
-    }
+    // In plan mode an allow rule must not override the read-only tool and shell
+    // restrictions, including for unknown tools and mutating bash commands.
+    if (mode !== "plan") return verdict("allow", "A user allow-rule matched this call.", "user-allow");
   }
 
   return modeDecision(mode, call, ctx);

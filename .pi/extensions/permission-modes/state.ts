@@ -52,8 +52,19 @@ export function resolveInitialMode(
   };
 }
 
-export type AppendModeEntry = (customType: string, data: { mode: PermissionMode }) => void;
+export function restorePlanTools(entries: readonly unknown[]): string[] | undefined {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index] as EntryLike | undefined;
+    if (entry?.type !== "custom" || entry.customType !== MODE_ENTRY_TYPE) continue;
+    if (!isRecord(entry.data) || entry.data.mode !== "plan" || !Array.isArray(entry.data.previousTools) ||
+        !entry.data.previousTools.every((name: unknown) => typeof name === "string" && name.length > 0)) return undefined;
+    return [...entry.data.previousTools] as string[];
+  }
+  return undefined;
+}
 
-export function persistMode(mode: PermissionMode, appendEntry: AppendModeEntry): void {
-  appendEntry(MODE_ENTRY_TYPE, { mode });
+export type AppendModeEntry = (customType: string, data: { mode: PermissionMode; previousTools?: string[] }) => void;
+
+export function persistMode(mode: PermissionMode, appendEntry: AppendModeEntry, previousTools?: readonly string[]): void {
+  appendEntry(MODE_ENTRY_TYPE, previousTools === undefined ? { mode } : { mode, previousTools: [...previousTools] });
 }

@@ -50,9 +50,9 @@ test("policy follows the 24-case spec table (excluding auto-classifier case #21)
   try {
     const cases: SpecCase[] = [
       { number: 1, name: "plan denies edits", mode: "plan", createCall: (f) => call("edit", { path: "src/a.ts" }), expected: "deny" },
-      { number: 2, name: "plan permits the active plan file", mode: "plan", createCall: (f) => call("write", { path: f.ctx.planFilePath }), expected: "allow" },
+      { number: 2, name: "plan denies general write even for the active plan file", mode: "plan", createCall: (f) => call("write", { path: f.ctx.planFilePath }), expected: "deny" },
       { number: 3, name: "plan denies shell chaining", mode: "plan", createCall: () => call("bash", { command: "ls; rm x" }), expected: "deny" },
-      { number: 4, name: "quoted grep operator remains an argument", mode: "plan", createCall: () => call("bash", { command: 'grep ";" a.txt' }), expected: "allow" },
+      { number: 4, name: "plan denies bash even when its command is read-only", mode: "plan", createCall: () => call("bash", { command: 'grep ";" a.txt' }), expected: "deny" },
       { number: 5, name: "default allows read-only bash", mode: "default", createCall: () => call("bash", { command: "cat a.txt" }), expected: "allow" },
       { number: 6, name: "default asks before editing", mode: "default", createCall: () => call("edit", { path: "a.ts" }), expected: "ask" },
       { number: 7, name: "acceptEdits allows an in-cwd edit", mode: "acceptEdits", createCall: () => call("edit", { path: "a.ts" }), expected: "allow" },
@@ -90,7 +90,7 @@ test("policy follows the 24-case spec table (excluding auto-classifier case #21)
       { number: 19, name: "default asks for destructive find", mode: "default", createCall: () => call("bash", { command: "find . -delete" }), expected: "ask" },
       { number: 20, name: "leading assignments fail closed", mode: "default", createCall: () => call("bash", { command: "FOO=1 ls" }), expected: "ask" },
       { number: 22, name: "unknown extension tools require approval", mode: "default", createCall: () => call("mcp__example", { action: "run" }), expected: "ask" },
-      { number: 23, name: "plan allows read-only git", mode: "plan", createCall: () => call("bash", { command: "git log" }), expected: "allow" },
+      { number: 23, name: "plan denies read-only git through bash", mode: "plan", createCall: () => call("bash", { command: "git log" }), expected: "deny" },
       { number: 24, name: "plan denies mutating git", mode: "plan", createCall: () => call("bash", { command: "git commit -m x" }), expected: "deny" },
     ];
 
@@ -107,7 +107,7 @@ test("policy follows the 24-case spec table (excluding auto-classifier case #21)
   }
 });
 
-test("protected reads require approval in every mode except bypass", async () => {
+test("protected reads require approval except in bypass, and plan denies bash", async () => {
   const fixture = await makeFixture();
   try {
     const calls = [
@@ -122,7 +122,7 @@ test("protected reads require approval in every mode except bypass", async () =>
     const modes: Mode[] = ["default", "acceptEdits", "plan", "auto", "dontAsk"];
     for (const mode of modes) {
       for (const toolCall of calls) {
-        const expected = mode === "dontAsk" ? "deny" : "ask";
+        const expected = mode === "dontAsk" || (mode === "plan" && toolCall.toolName === "bash") ? "deny" : "ask";
         assert.equal(decide(mode, toolCall, fixture.ctx).action, expected, `${mode}: ${toolCall.toolName}`);
       }
     }
@@ -157,7 +157,7 @@ test("outside-cwd reads require approval, including home, absolute, and symlink 
 
     for (const mode of ["default", "acceptEdits", "plan", "auto", "dontAsk"] as const) {
       for (const toolCall of calls) {
-        const expected = mode === "dontAsk" ? "deny" : "ask";
+        const expected = mode === "dontAsk" || (mode === "plan" && toolCall.toolName === "bash") ? "deny" : "ask";
         assert.equal(decide(mode, toolCall, fixture.ctx).action, expected, `${mode}: ${toolCall.toolName}`);
       }
     }
@@ -228,6 +228,33 @@ test("writes to sensitive paths are hard-denied, including bash writes", async (
   }
 });
 
+test("plan mode denies all bash and unknown tools before ask and allow rules", async () => {
+  const fixture = await makeFixture();
+  try {
+    for (const command of ["git status", "git log", "echo hello", "cat .env", "npm install"]) {
+      for (const rules of [{}, { allow: ["bash:*"] }, { ask: ["bash:*"] }]) {
+        const result = decide("plan", call("bash", { command }), { ...fixture.ctx, rules });
+        assert.equal(result.action, "deny", `${command} with ${JSON.stringify(rules)}`);
+      }
+    }
+    for (const toolName of ["powershell", "custom"]) {
+      for (const rules of [{}, { allow: [`${toolName}:**`] }, { ask: [`${toolName}:**`] }]) {
+        const result = decide("plan", call(toolName, { path: "src/a.ts" }), { ...fixture.ctx, rules });
+        assert.equal(result.action, "deny", `${toolName} with ${JSON.stringify(rules)}`);
+      }
+    }
+    for (const toolName of ["edit", "write"]) {
+      for (const rules of [{}, { allow: [`${toolName}:**`] }, { ask: [`${toolName}:**`] }]) {
+        const result = decide("plan", call(toolName, { path: fixture.ctx.planFilePath }), { ...fixture.ctx, rules });
+        assert.equal(result.action, "deny", `${toolName} with ${JSON.stringify(rules)}`);
+      }
+    }
+    assert.equal(decide("plan", call("read", { path: "src/a.ts" }), fixture.ctx).action, "allow");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("user rules retain deny/ask/allow priority and plan write restrictions", async () => {
   const fixture = await makeFixture();
   try {
@@ -250,6 +277,21 @@ test("user rules retain deny/ask/allow priority and plan write restrictions", as
       rules: { allow: ["write:**"] },
     });
     assert.equal(planDenied.action, "deny");
+    const planShell = decide("plan", call("bash", { command: "npm install" }), {
+      ...fixture.ctx,
+      rules: { allow: ["bash:*"] },
+    });
+    assert.equal(planShell.action, "deny", "allow rules cannot make mutating shell commands read-only");
+    const planUnknown = decide("plan", call("custom", { path: "src/a.ts" }), {
+      ...fixture.ctx,
+      rules: { allow: ["custom:**"] },
+    });
+    assert.equal(planUnknown.action, "deny", "allow rules cannot grant unknown tools in plan mode");
+    const planWrite = decide("plan", call("write", { path: fixture.ctx.planFilePath }), {
+      ...fixture.ctx,
+      rules: { allow: ["write:**"] },
+    });
+    assert.equal(planWrite.action, "deny", "general write cannot bypass the dedicated plan writer");
   } finally {
     await fixture.cleanup();
   }

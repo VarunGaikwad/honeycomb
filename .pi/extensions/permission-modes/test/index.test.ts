@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, symlinkSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 import registerPermissionModes, { createToolCallHandler } from "../index.ts";
@@ -140,16 +143,26 @@ test("Allow once does not create a session grant and policy deny cannot be overr
 });
 
 interface FakePi {
+  registerTool(tool: unknown): void;
   registerFlag(name: string, options: unknown): void;
   getFlag(name: string): string | boolean | undefined;
   appendEntry(customType: string, data?: unknown): void;
   on(event: string, handler: unknown): () => void;
   registerCommand(name: string, options: unknown): void;
   registerShortcut(shortcut: string, options: unknown): void;
+  getActiveTools(): string[];
+  setActiveTools(names: string[]): void;
+  getAllTools(): Array<{ name: string; sourceInfo: { source: string; path: string } }>;
+  sendUserMessage(content: string): void;
 }
 
 function makeFakePi() {
   let flag: string | undefined;
+  let activeTools = ["read", "bash", "edit", "write", "custom", "grep", "find", "ls"];
+  const sentMessages: string[] = [];
+  const allTools = activeTools.map((name) => ({
+    name, sourceInfo: { source: name === "custom" ? "extension" : "builtin", path: `builtin:${name}` },
+  }));
   const entries: unknown[] = [];
   const statuses = new Map<string, string | undefined>();
   const notifications: string[] = [];
@@ -158,7 +171,9 @@ function makeFakePi() {
   const commandOptions = new Map<string, unknown>();
   const shortcuts = new Map<string, unknown>();
   const registeredFlags: Array<{ name: string; options: unknown }> = [];
+  const tools: unknown[] = [];
   const api: FakePi = {
+    registerTool: (tool) => { tools.push(tool); },
     registerFlag: (name, options) => registeredFlags.push({ name, options }),
     getFlag: () => flag,
     appendEntry: (customType, data) => entries.push({ type: "custom", customType, data }),
@@ -171,9 +186,14 @@ function makeFakePi() {
       commands.set(name, (options as { handler: (...args: unknown[]) => unknown }).handler);
     },
     registerShortcut: (shortcut, options) => shortcuts.set(shortcut, options),
+    getActiveTools: () => [...activeTools],
+    setActiveTools: (names) => { activeTools = [...names]; },
+    getAllTools: () => allTools,
+    sendUserMessage: (content) => { sentMessages.push(content); },
   };
   return {
     api,
+    tools,
     entries,
     statuses,
     notifications,
@@ -182,6 +202,8 @@ function makeFakePi() {
     commandOptions,
     shortcuts,
     registeredFlags,
+    allTools,
+    sentMessages,
     setFlag: (value: string | undefined) => { flag = value; },
   };
 }
@@ -285,6 +307,109 @@ test("bypass requires the startup flag and an interactive confirmation to switch
   assert.equal(fake.statuses.get("permission-modes"), "● manual", "cancelled confirmation leaves the mode unchanged");
 });
 
+test("plan mode filters and restores exact tools, injects instructions, and blocks unsafe calls", async () => {
+  const fake = makeFakePi();
+  registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+  const ctx = makeContext({ entries: fake.entries, onStatus: (key, text) => fake.statuses.set(key, text) });
+  await callHandler(fake.eventHandlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+  const before = fake.api.getActiveTools();
+  await callCommand(fake.commands, "mode", "plan", ctx);
+  assert.equal(fake.statuses.get("permission-modes"), "⏸ plan");
+  assert.deepEqual(fake.api.getActiveTools(), ["read", "grep", "find", "ls", "save_plan"]);
+  const prompt = await callHandler(fake.eventHandlers, "before_agent_start", { systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  assert.match(prompt.systemPrompt, /PLAN mode/);
+  assert.match(prompt.systemPrompt, /Use save_plan/);
+  for (const toolName of ["bash", "write", "edit", "custom", "powershell"]) {
+    const blocked = await callHandler(fake.eventHandlers, "tool_call", { toolName, input: { command: "git status", path: "a.ts" } }, ctx) as { block: boolean };
+    assert.equal(blocked.block, true, toolName);
+  }
+  assert.equal(await callHandler(fake.eventHandlers, "tool_call", { toolName: "read", input: { path: "a.ts" } }, ctx), undefined);
+  await callCommand(fake.commands, "mode", "default", ctx);
+  assert.deepEqual(fake.api.getActiveTools(), before);
+  assert.equal(await callHandler(fake.eventHandlers, "before_agent_start", { systemPrompt: "base" }, ctx), undefined);
+});
+
+test("CLI plan mode saves the original tool list for reload and exit", async () => {
+  const fake = makeFakePi();
+  fake.setFlag("plan");
+  registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+  const ctx = makeContext({ entries: fake.entries });
+  const before = fake.api.getActiveTools();
+  await callHandler(fake.eventHandlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+  assert.deepEqual(fake.api.getActiveTools(), ["read", "grep", "find", "ls", "save_plan"]);
+  await callHandler(fake.eventHandlers, "session_start", { type: "session_start", reason: "reload" }, ctx);
+  await callCommand(fake.commands, "mode", "default", ctx);
+  assert.deepEqual(fake.api.getActiveTools(), before);
+});
+
+test("plan restore keeps the saved full active-tool list across reload", async () => {
+  const fake = makeFakePi();
+  registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+  const ctx = makeContext({ entries: fake.entries });
+  await callHandler(fake.eventHandlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+  const before = fake.api.getActiveTools();
+  await callCommand(fake.commands, "mode", "plan", ctx);
+  await callHandler(fake.eventHandlers, "session_start", { type: "session_start", reason: "reload" }, ctx);
+  assert.deepEqual(fake.api.getActiveTools(), ["read", "grep", "find", "ls", "save_plan"]);
+  await callCommand(fake.commands, "mode", "acceptEdits", ctx);
+  assert.deepEqual(fake.api.getActiveTools(), before);
+});
+
+test("plan mode rejects tools masquerading as trusted read built-ins", async () => {
+  const fake = makeFakePi();
+  fake.allTools.find((tool) => tool.name === "read")!.sourceInfo.source = "extension";
+  registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+  const ctx = makeContext({ entries: fake.entries });
+  await callHandler(fake.eventHandlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+  await callCommand(fake.commands, "mode", "plan", ctx);
+  assert.ok(!fake.api.getActiveTools().includes("read"));
+  const blocked = await callHandler(fake.eventHandlers, "tool_call", { toolName: "read", input: { path: "a.ts" } }, ctx) as { block: boolean };
+  assert.equal(blocked.block, true);
+});
+
+test("a stale settled-dialog discard cannot change a later plan session", async () => {
+  const fake = makeFakePi();
+  registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+  let finish!: (value: string | undefined) => void;
+  const ctx = makeContext({ entries: fake.entries, onStatus: (key, text) => fake.statuses.set(key, text),
+    select: () => new Promise((resolve) => { finish = resolve; }) });
+  await callHandler(fake.eventHandlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+  await callCommand(fake.commands, "mode", "plan", ctx);
+  const pending = callHandler(fake.eventHandlers, "agent_settled", { type: "agent_settled", aborted: false }, ctx);
+  await callCommand(fake.commands, "mode", "default", ctx);
+  await callCommand(fake.commands, "mode", "plan", ctx);
+  finish("Discard");
+  await pending;
+  assert.equal(fake.statuses.get("permission-modes"), "⏸ plan");
+  assert.deepEqual(fake.sentMessages, []);
+});
+
+test("plan approval decisions never start implementation without secure storage", async () => {
+  const fake = makeFakePi();
+  registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+  let selection: string | undefined;
+  let prompts = 0;
+  const ctx = makeContext({ entries: fake.entries, onStatus: (key, text) => fake.statuses.set(key, text),
+    onNotify: (message) => fake.notifications.push(message), select: () => { prompts++; return selection; } });
+  await callHandler(fake.eventHandlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+  await callCommand(fake.commands, "mode", "plan", ctx);
+  for (selection of ["Approve → switch to acceptEdits and start", "Approve → switch to default", "Keep planning", undefined]) {
+    await callHandler(fake.eventHandlers, "agent_settled", { type: "agent_settled", aborted: false }, ctx);
+    assert.equal(fake.statuses.get("permission-modes"), "⏸ plan");
+    assert.deepEqual(fake.sentMessages, []);
+  }
+  assert.ok(fake.notifications.some((message) => message.includes("saved plan is required")));
+  const noUI = makeContext({ hasUI: false, entries: fake.entries, select: () => { throw new Error("must not prompt"); } });
+  await callHandler(fake.eventHandlers, "agent_settled", { type: "agent_settled", aborted: false }, noUI);
+  await callHandler(fake.eventHandlers, "agent_settled", { type: "agent_settled", aborted: true }, ctx);
+  assert.equal(prompts, 4);
+  selection = "Discard";
+  await callHandler(fake.eventHandlers, "agent_settled", { type: "agent_settled", aborted: false }, ctx);
+  assert.equal(fake.statuses.get("permission-modes"), "● manual");
+  assert.deepEqual(fake.api.getActiveTools(), ["read", "bash", "edit", "write", "custom", "grep", "find", "ls"]);
+  assert.deepEqual(fake.sentMessages, []);
+});
+
 test("extension tool-call hook asks in the UI and blocks a denial", async () => {
   const fake = makeFakePi();
   registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
@@ -305,4 +430,117 @@ test("extension tool-call hook asks in the UI and blocks a denial", async () => 
 
   selection = "Allow once";
   assert.equal(await callHandler(fake.eventHandlers, "tool_call", event, ctx), undefined);
+});
+
+
+test("save_plan enforces mode, content-only input, revisions and symlink safety", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "permission-plan-"));
+  try {
+    const fake = makeFakePi();
+    registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+    const tool = fake.tools[0] as { execute(id: string, args: unknown, signal: AbortSignal | undefined, update: undefined, ctx: TestContext): Promise<{ details: { path: string } }> };
+    const ctx = makeContext({ cwd: dir, entries: fake.entries });
+    await callHandler(fake.eventHandlers, "session_start", {}, ctx);
+    await assert.rejects(tool.execute("1", { content: "no" }, undefined, undefined, ctx));
+    await callCommand(fake.commands, "mode", "plan", ctx);
+    await assert.rejects(tool.execute("1", { content: "no", path: "../../escape" }, undefined, undefined, ctx));
+    const first = await tool.execute("1", { content: "first" }, undefined, undefined, ctx);
+    const second = await tool.execute("2", { content: "second" }, undefined, undefined, ctx);
+    assert.notEqual(first.details.path, second.details.path);
+    assert.equal(readFileSync(first.details.path, "utf8"), "first");
+    assert.equal(readFileSync(second.details.path, "utf8"), "second");
+    assert.equal(path.dirname(first.details.path), path.join(dir, ".pi", "plans"));
+    const abort = new AbortController(); abort.abort();
+    await assert.rejects(tool.execute("3", { content: "abort" }, abort.signal, undefined, ctx));
+    const other = mkdtempSync(path.join(tmpdir(), "permission-link-"));
+    try {
+      mkdirSync(path.join(other, ".pi"));
+      symlinkSync(path.join(dir, ".pi", "plans"), path.join(other, ".pi", "plans"));
+      await assert.rejects(tool.execute("4", { content: "bad" }, undefined, undefined, makeContext({ cwd: other })));
+    } finally { rmSync(other, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("saved plans require explicit approval and hand off exactly once in each mode", async () => {
+  for (const [choice, badge] of [["Approve → switch to acceptEdits and start", "✎ edits"], ["Approve → switch to default", "● manual"]]) {
+    const dir = mkdtempSync(path.join(tmpdir(), "plan-approval-"));
+    try {
+      const fake = makeFakePi();
+      registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+      let selection = "Keep planning";
+      const ctx = makeContext({ cwd: dir, entries: fake.entries, select: () => selection, onStatus: (k, v) => fake.statuses.set(k, v) });
+      await callHandler(fake.eventHandlers, "session_start", {}, ctx);
+      const original = fake.api.getActiveTools();
+      await callCommand(fake.commands, "mode", "plan", ctx);
+      const tool = fake.tools[0] as { execute(id: string, args: unknown, signal: undefined, update: undefined, ctx: TestContext): Promise<unknown> };
+      await tool.execute("1", { content: "1. implement feature" }, undefined, undefined, ctx);
+      await callHandler(fake.eventHandlers, "agent_settled", { aborted: false }, ctx);
+      assert.deepEqual(fake.sentMessages, []);
+      selection = choice!;
+      await Promise.all([callHandler(fake.eventHandlers, "agent_settled", { aborted: false }, ctx), callHandler(fake.eventHandlers, "agent_settled", { aborted: false }, ctx)]);
+      assert.equal(fake.statuses.get("permission-modes"), badge);
+      assert.deepEqual(fake.api.getActiveTools(), original);
+      assert.deepEqual(fake.sentMessages, ["Implement the following approved plan:\n\n1. implement feature"]);
+      await callHandler(fake.eventHandlers, "agent_settled", { aborted: false }, ctx);
+      assert.equal(fake.sentMessages.length, 1);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("mode change after approval transition but before handoff cancels the stale handoff", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "plan-transition-race-"));
+  try {
+    const fake = makeFakePi(); registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+    const ctx = makeContext({ cwd: dir, entries: fake.entries, select: () => "Approve → switch to acceptEdits and start",
+      onStatus: (key, value) => fake.statuses.set(key, value) });
+    await callHandler(fake.eventHandlers, "session_start", {}, ctx); await callCommand(fake.commands, "mode", "plan", ctx);
+    const tool = fake.tools[0] as { execute(id: string, args: unknown, signal: undefined, update: undefined, ctx: TestContext): Promise<unknown> };
+    await tool.execute("1", { content: "approved plan" }, undefined, undefined, ctx);
+    const approval = callHandler(fake.eventHandlers, "agent_settled", { aborted: false }, ctx);
+    await callCommand(fake.commands, "mode", "default", ctx);
+    await approval;
+    assert.deepEqual(fake.sentMessages, []);
+    assert.equal(fake.statuses.get("permission-modes"), "● manual");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("revision change during approval rejects stale dialog", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "plan-stale-"));
+  try {
+    const fake = makeFakePi(); registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+    let finish!: (value: string) => void;
+    const ctx = makeContext({ cwd: dir, entries: fake.entries, select: () => new Promise(resolve => { finish = resolve; }) });
+    await callHandler(fake.eventHandlers, "session_start", {}, ctx); await callCommand(fake.commands, "mode", "plan", ctx);
+    const tool = fake.tools[0] as { execute(id: string, args: unknown, signal: undefined, update: undefined, ctx: TestContext): Promise<unknown> };
+    await tool.execute("1", { content: "A" }, undefined, undefined, ctx);
+    const pending = callHandler(fake.eventHandlers, "agent_settled", { aborted: false }, ctx);
+    await tool.execute("2", { content: "B" }, undefined, undefined, ctx);
+    finish("Approve → switch to default"); await pending;
+    assert.deepEqual(fake.sentMessages, []);
+    assert.ok(fake.api.getActiveTools().includes("save_plan"));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("missing saved file and send failure cannot trigger duplicate handoffs", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "plan-error-"));
+  try {
+    const fake = makeFakePi(); let attempts = 0;
+    fake.api.sendUserMessage = () => { attempts++; throw new Error("send failed"); };
+    registerPermissionModes(fake.api as unknown as Parameters<typeof registerPermissionModes>[0]);
+    const ctx = makeContext({ cwd: dir, entries: fake.entries, select: () => "Approve → switch to default", onNotify: message => fake.notifications.push(message) });
+    await callHandler(fake.eventHandlers, "session_start", {}, ctx); await callCommand(fake.commands, "mode", "plan", ctx);
+    const tool = fake.tools[0] as { execute(id: string, args: unknown, signal: undefined, update: undefined, ctx: TestContext): Promise<{ details: { path: string } }> };
+    const saved = await tool.execute("1", { content: "first" }, undefined, undefined, ctx);
+    rmSync(saved.details.path);
+    await callHandler(fake.eventHandlers, "agent_settled", { aborted: false }, ctx);
+    assert.equal(attempts, 0);
+    assert.ok(fake.notifications.some(message => message.includes("missing or invalid")));
+    await tool.execute("2", { content: "second" }, undefined, undefined, ctx);
+    await callHandler(fake.eventHandlers, "agent_settled", { aborted: false }, ctx);
+    await callHandler(fake.eventHandlers, "agent_settled", { aborted: false }, ctx);
+    assert.equal(attempts, 1);
+    assert.ok(fake.notifications.some(message => message.includes("handoff failed")));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
