@@ -29,13 +29,57 @@ function containsProtectedDescendant(cwd: string, target: string): boolean {
   return false;
 }
 
-function matchesRule(tool: string, args: Record<string, unknown>, rule: string): boolean {
+function globExpression(glob: string): RegExp {
+  const pattern = [...glob].map(c => c === '*' ? '.*' : c === '?' ? '.' : c.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')).join('');
+  return new RegExp(`^${pattern}$`, 's');
+}
+
+function matchesRule(tool: string, args: Record<string, unknown>, rule: string, cwd: string): boolean {
   const split = rule.indexOf(':');
   if (split < 1 || rule.slice(0, split) !== tool) return false;
-  const values = tool === 'bash' ? [args.command] : [args.path, args.source, args.destination, ...(Array.isArray(args.edits) ? args.edits.map(edit => edit && typeof edit === 'object' ? (edit as Record<string, unknown>).path : undefined) : [])];
-  const pattern = [...rule.slice(split + 1)].map(c => c === '*' ? '.*' : c === '?' ? '.' : c.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')).join('');
-  const expression = new RegExp(`^${pattern}$`);
-  return values.some(value => typeof value === 'string' && expression.test(value));
+  const values = ['bash', 'background', 'terminal'].includes(tool) ? [args.command, args.input] : [args.path, args.source, args.destination, ...(Array.isArray(args.edits) ? args.edits.map(edit => edit && typeof edit === 'object' ? (edit as Record<string, unknown>).path : undefined) : [])];
+  if (!values.some(value => typeof value === 'string')) values.push(JSON.stringify(args));
+  const rulePath = rule.slice(split + 1);
+  const patterns = [rulePath];
+  if (tool !== 'bash') {
+    try {
+      const wildcard = rulePath.search(/[*?]/);
+      const prefix = wildcard < 0 ? rulePath : rulePath.slice(0, wildcard);
+      const base = wildcard < 0 ? prefix : prefix.endsWith('/') ? prefix.slice(0, -1) || '/' : path.dirname(prefix);
+      const suffix = wildcard < 0 ? '' : rulePath.slice(base === '.' ? 0 : base.length);
+      const resolved = resolvePermissionPath(cwd, base) + suffix;
+      patterns.push(resolved, path.relative(resolvePermissionPath(cwd, '.'), resolved));
+    } catch { /* Invalid paths are rejected by the path checks below. */ }
+  }
+  const expressions = patterns.map(globExpression);
+  const matches = (value: string) => expressions.some(expression => expression.test(value));
+  return values.some(value => {
+    if (typeof value !== 'string') return false;
+    if (matches(value)) return true;
+    if (tool === 'bash') return false;
+    try {
+      const root = resolvePermissionPath(cwd, '.');
+      const lexical = path.resolve(cwd, value);
+      const resolved = resolvePermissionPath(cwd, value);
+      return [lexical, resolved, path.relative(cwd, lexical), path.relative(root, resolved)].some(matches);
+    } catch { return false; }
+  });
+}
+
+function matchesWriteAllow(cwd: string, tool: string, target: string, rules: string[]): boolean {
+  try {
+    const root = resolvePermissionPath(cwd, '.');
+    const resolved = resolvePermissionPath(cwd, target);
+    if (!isWithin(root, resolved)) return false;
+    const relative = path.relative(root, resolved);
+    return rules.some(rule => {
+      if (!rule.startsWith(`${tool}:`)) return false;
+      const pattern = rule.slice(tool.length + 1).replace(/^(?:\.\/)+/, '');
+      return globExpression(pattern).test(path.isAbsolute(pattern) ? resolved : relative);
+    });
+  } catch {
+    return false;
+  }
 }
 
 /** Mode gate only: the tool's own validation and authorization still run. */
@@ -109,7 +153,7 @@ export function decidePermission(mode: string, toolName: string, input: unknown,
   const listBranches = toolName === 'git_branch' && args.name === undefined;
   if (mode === 'plan' && !listBranches && ![...readTools, 'git_status', 'git_diff', 'git_log', 'goal_report', 'todo', 'plan', 'ask_user', 'plan_note'].includes(toolName))
     return result('deny', 'Plan mode blocks mutation, execution and delegation');
-  const matches = (items?: string[]) => items?.some(rule => matchesRule(toolName, args, rule)) ?? false;
+  const matches = (items?: string[]) => items?.some(rule => matchesRule(toolName, args, rule, cwd)) ?? false;
   if (matches(rules.deny)) return result('deny', 'Denied by permission rule', 'rule');
   if (matches(rules.ask)) return result(mode === 'dontAsk' ? 'deny' : 'ask', 'Requires approval by permission rule', 'rule');
   if (shellUnknown) return result(mode === 'dontAsk' ? 'deny' : 'ask', 'Unclassified shell command requires approval');
@@ -119,7 +163,10 @@ export function decidePermission(mode: string, toolName: string, input: unknown,
   if (toolName === 'plan_note') return mode === 'plan' ? result('allow', 'Session plan note') : result('deny', 'Plan note is available only in Plan mode');
   if (listBranches || [...readTools, 'git_status', 'git_diff', 'git_log', 'goal_report', 'todo', 'plan', 'ask_user', 'process'].includes(toolName)) return result('allow', 'Read or session bookkeeping');
   const ordinaryEdit = ['write', 'edit', 'mkdir', 'apply_patch', 'copy', 'move'].includes(toolName);
-  if (ordinaryEdit && writePaths.length === 1 && readPaths.length === 0 && matches(rules.allow)) return result('allow', 'Allowed by trusted user rule', 'rule');
+  if (ordinaryEdit && writePaths.length === 1 && readPaths.length === 0 && rules.allow &&
+      matchesWriteAllow(cwd, toolName, writePaths[0] as string, rules.allow)) {
+    return result('allow', 'Allowed by trusted user rule', 'rule');
+  }
   if (ordinaryEdit && ['acceptEdits', 'auto'].includes(mode)) return result('allow', 'Project edit', 'default');
   if (mode === 'bypassPermissions' && (ordinaryEdit || toolName === 'delete' || (shellTool && typeof args.command === 'string'))) return result('allow', 'Bypass mode', 'default');
   if (mode === 'dontAsk') return result('deny', 'Permission requires confirmation');

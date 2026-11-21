@@ -39,6 +39,6 @@ export function isProtectedWrite(target: string): boolean {
     ['.netrc', '.npmrc', '.pypirc', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519'].includes(part) ||
     ['.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.profile', '.zshrc', '.zshenv', '.zprofile', '.zlogin', '.zlogout'].includes(part) ||
     /\.(?:pem|key|p12|pfx)$/.test(part) ||
-    (part === '.pi' && parts.slice(index + 1).some(child => ['settings.json', 'extensions'].includes(child))),
+    (part === '.pi' && parts.slice(index + 1).some(child => ['settings.json', 'extensions', 'permission-modes.json'].includes(child))),
   );
 }

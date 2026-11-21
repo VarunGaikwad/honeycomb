@@ -1,12 +1,80 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, symlink, mkdir, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, readFile, rename, rm, symlink, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createPermissionModes } from '../src/extension/permission-modes/index.ts';
 import { decidePermission } from '../src/extension/permission-modes/policy.ts';
 import { planNotePath, writePlanNote } from '../src/extension/permission-modes/plan-note.ts';
 import { installTui } from '../src/tui/index.ts';
+
+test('permission rules apply to resolved destinations and protect their configuration', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-rule-safety-'));
+  try {
+    await mkdir(path.join(cwd, 'docs'));
+    await mkdir(path.join(cwd, 'src'));
+    await symlink('../src', path.join(cwd, 'docs', 'alias'));
+    const rules = { allow: ['write:docs/*'], deny: ['git_diff:*'] };
+    assert.equal(decidePermission('default', 'write', { path: 'docs/guide', content: '' }, cwd, rules).action, 'allow');
+    assert.equal(decidePermission('default', 'write', { path: 'docs/../src/file', content: '' }, cwd, rules).action, 'ask');
+    assert.equal(decidePermission('default', 'write', { path: 'docs/alias/file', content: '' }, cwd, rules).action, 'ask');
+    assert.equal(decidePermission('acceptEdits', 'write', { path: '.pi/permission-modes.json', content: '{}' }, cwd).action, 'deny');
+    assert.equal(decidePermission('bypassPermissions', 'git_diff', {}, cwd, rules).action, 'deny');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('writing a plan note does not modify an existing hard-linked file', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-plan-link-'));
+  try {
+    const original = path.join(cwd, 'original');
+    await writeFile(original, 'original content');
+    await mkdir(path.join(cwd, '.pi', 'plans'), { recursive: true });
+    await link(original, planNotePath(cwd, 'session-1'));
+    await writePlanNote(cwd, 'session-1', 'new plan');
+    assert.equal(await readFile(original, 'utf8'), 'original content');
+    assert.equal(await readFile(planNotePath(cwd, 'session-1'), 'utf8'), 'new plan');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('a symlink at the allow rule prefix cannot move the allowed scope', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-allow-prefix-'));
+  try {
+    await mkdir(path.join(cwd, 'src'));
+    await symlink('src', path.join(cwd, 'docs'));
+    for (const pattern of ['docs/*', './docs/*', path.join(cwd, 'docs/*')]) {
+      const rules = { allow: [`write:${pattern}`] };
+      for (const target of ['docs/file', 'src/file']) {
+        assert.equal(decidePermission('default', 'write', { path: target, content: '' }, cwd, rules).action, 'ask');
+      }
+    }
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('the Pi tool gate rejects linked project permission rules', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-linked-rules-'));
+  try {
+    const h = host();
+    const ctx = context(cwd);
+    await h.emit('session_start', {}, ctx);
+    h.shortcut();
+    const ordinaryWrite = { toolName: 'write', input: { path: 'target.json', content: '{}' } };
+    assert.equal(await h.emit('tool_call', ordinaryWrite, ctx), undefined);
+    await mkdir(path.join(cwd, '.pi'));
+    const config = path.join(cwd, '.pi', 'permission-modes.json');
+    const target = path.join(cwd, 'target.json');
+    await writeFile(target, '{"deny":["read:*"]}');
+    for (const makeLink of [() => symlink(target, config), () => symlink('missing.json', config), () => link(target, config)]) {
+      await makeLink();
+      assert.match((await h.emit('tool_call', ordinaryWrite, ctx)).reason, /Invalid permission configuration/);
+      await rm(config);
+    }
+    await writeFile(config, '{"deny":["read:*"]}');
+    assert.equal((await h.emit('tool_call', { toolName: 'read', input: { path: 'target.json' } }, ctx)).block, true);
+    await rename(path.join(cwd, '.pi'), path.join(cwd, 'settings'));
+    await symlink('settings', path.join(cwd, '.pi'));
+    assert.match((await h.emit('tool_call', ordinaryWrite, ctx)).reason, /Invalid permission configuration/);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
 
 function host(flag?: string, reviewer?: any) {
   const events = new Map<string, any[]>(), entries: any[] = [];
@@ -216,5 +284,83 @@ test('branch changes restore the saved mode and explicit asks override session a
     await h.emit('session_tree', {}, ctx);
     assert.equal(h.controller.mode, 'acceptEdits');
     assert.equal((await h.emit('tool_call', call, ctx)).block, true);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('path rules cover normalized paths, symlink targets, and all patch paths', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-rule-path-'));
+  try {
+    await mkdir(path.join(cwd, 'private'));
+    await writeFile(path.join(cwd, 'private', 'data'), 'a');
+    await symlink('private', path.join(cwd, 'alias'));
+    const rules = { deny: ['read:private/*', 'apply_patch:private/*', 'copy:private/*'] };
+    assert.equal(decidePermission('default', 'read', { path: './private/data' }, cwd, rules).action, 'deny');
+    assert.equal(decidePermission('default', 'read', { path: 'alias/data' }, cwd, rules).action, 'deny');
+    assert.equal(decidePermission('default', 'read', { path: 'private/data' }, cwd, { deny: ['read:alias/*'] }).action, 'deny');
+    assert.equal(decidePermission('default', 'read', { path: 'private/data' }, cwd, { ask: ['read:alias/data'] }).action, 'ask');
+    assert.equal(decidePermission('acceptEdits', 'copy', { source: 'alias/data', destination: 'other' }, cwd, rules).action, 'deny');
+    assert.equal(decidePermission('acceptEdits', 'move', { source: 'other', destination: './private/data' }, cwd, { deny: ['move:private/*'] }).action, 'deny');
+    assert.equal(decidePermission('acceptEdits', 'apply_patch', { edits: [{ path: 'other', oldText: 'a', newText: 'b' }, { path: 'alias/data', oldText: 'a', newText: 'b' }] }, cwd, rules).action, 'deny');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('standalone plan approval creates a single continuation', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-plan-start-'));
+  try {
+    const h = host(), ctx = context(cwd, 'Start in Manual');
+    await h.emit('session_start', {}, ctx); h.shortcut(); h.shortcut();
+    await h.tool.execute('1', { content: 'Implement the fix' }, undefined, undefined, ctx);
+    const result = await h.emit('agent_before_settle', { outcome: 'completed', entries: [], context: { pendingMessages: [] }, continue: false }, ctx);
+    assert.equal(result.continue, true);
+    assert.equal(result.entries.filter((entry: any) => entry.customType === 'bi.plan-approval').length, 1);
+    assert.equal(h.controller.mode, 'default');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('remaining Plan choices do not start implementation', async () => {
+  for (const choice of ['Keep planning', 'Discard the note', undefined]) {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-plan-choice-'));
+    try {
+      const h = host(), ctx = context(cwd, choice);
+      await h.emit('session_start', {}, ctx); h.shortcut(); h.shortcut();
+      await h.tool.execute('1', { content: 'Plan' }, undefined, undefined, ctx);
+      const result = await h.emit('agent_before_settle', { outcome: 'completed', entries: [], context: { pendingMessages: [] }, continue: false }, ctx);
+      assert.equal(result, undefined);
+      assert.equal(h.controller.mode, 'plan');
+      if (choice === 'Discard the note') await assert.rejects(readFile(planNotePath(cwd, 'session-1')));
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  }
+});
+
+test('sensitive git diff requires confirmation before tool execution', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-diff-'));
+  const git = (...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+  try {
+    git('init'); git('config', 'user.email', 'test@example.com'); git('config', 'user.name', 'Test');
+    await writeFile(path.join(cwd, '.env'), 'original');
+    await writeFile(path.join(cwd, 'normal'), 'original');
+    git('add', '.env', 'normal'); git('commit', '-m', 'initial');
+    const { createGitTools } = await import('../src/tools/git.ts');
+    const diff = createGitTools().find(tool => tool.name === 'git_diff')!;
+    let confirmations = 0;
+    const ctx = { workingDirectory: cwd, sessionId: 'test', confirmSensitiveRead: async () => { confirmations++; return false; } };
+    await writeFile(path.join(cwd, 'normal'), 'changed');
+    assert.equal((await diff.execute({}, ctx)).success, true);
+    assert.equal(confirmations, 0);
+    await writeFile(path.join(cwd, '.env'), 'secret');
+    const refused = await diff.execute({}, ctx);
+    assert.equal(refused.success, false);
+    assert.doesNotMatch(JSON.stringify(refused), /secret/);
+    git('add', '.env');
+    assert.equal((await diff.execute({ staged: true }, ctx)).success, false);
+    assert.equal((await diff.execute({ staged: true }, { ...ctx, confirmSensitiveRead: async () => true })).success, true);
+    assert.equal((await diff.execute({ staged: true }, { workingDirectory: cwd, sessionId: 'test' })).success, false);
+    git('reset', '--hard', 'HEAD');
+    git('mv', '.env', 'renamed');
+    assert.equal((await diff.execute({ staged: true }, ctx)).success, false);
+    git('reset', '--hard', 'HEAD');
+    git('rm', '.env');
+    assert.equal((await diff.execute({ staged: true }, ctx)).success, false);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });

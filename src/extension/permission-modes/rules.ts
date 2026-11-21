@@ -1,7 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { PermissionRules } from './policy.ts';
+import { resolvePermissionPath } from './paths.ts';
 
 const groups = ['allow', 'ask', 'deny'] as const;
 export function validateRules(value: unknown, trusted: boolean): PermissionRules & { defaultMode?: string } {
@@ -21,12 +22,41 @@ export function validateRules(value: unknown, trusted: boolean): PermissionRules
   }
   return result;
 }
+function readRulesFile(root: string, relativePath: string): unknown {
+  let file = resolvePermissionPath(root, '.');
+  for (const component of relativePath.split('/')) {
+    file = path.join(file, component);
+    if (lstatSync(file).isSymbolicLink()) {
+      throw new Error('permission rules path contains a symbolic link');
+    }
+  }
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new Error('permission rules must be a regular file with one link');
+    }
+    return JSON.parse(readFileSync(fd, 'utf8'));
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export function loadPermissionRules(cwd: string, report: (message: string) => void = console.warn) {
   if (typeof cwd !== 'string' || !cwd) return { rules: {} as PermissionRules, defaultMode: undefined as string | undefined, invalid: true };
-  let user: PermissionRules & { defaultMode?: string } = {}, project: PermissionRules = {};
   let invalid = false;
-  const load = (file: string, trusted: boolean) => { try { return validateRules(JSON.parse(readFileSync(file, 'utf8')), trusted); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') { invalid = true; report(`Invalid permission rules ${file}: ${String(e)}`); } return {}; } };
-  user = load(path.join(os.homedir(), '.pi/agent/permission-modes.json'), true);
-  project = load(path.join(cwd, '.pi/permission-modes.json'), false);
+  const load = (root: string, relativePath: string, trusted: boolean) => {
+    try {
+      return validateRules(readRulesFile(root, relativePath), trusted);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        invalid = true;
+        report(`Invalid permission rules ${path.join(root, relativePath)}: ${String(error)}`);
+      }
+      return {};
+    }
+  };
+  const user = load(os.homedir(), '.pi/agent/permission-modes.json', true);
+  const project = load(cwd, '.pi/permission-modes.json', false);
   return { rules: { allow: user.allow, ask: [...(user.ask ?? []), ...(project.ask ?? [])], deny: [...(user.deny ?? []), ...(project.deny ?? [])] }, defaultMode: user.defaultMode, invalid };
 }

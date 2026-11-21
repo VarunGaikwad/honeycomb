@@ -175,6 +175,8 @@ Optional trusted user settings live in `~/.pi/agent/permission-modes.json`. For 
 
 Rules use `tool:pattern`, where `*` and `?` are glob characters. User settings may also contain `allow`; project `.pi/permission-modes.json` can contain only `ask` and `deny`. Invalid configuration blocks tool calls until corrected. These files are separate from `.pi/config.json`.
 
+Path-based allow rules match the resolved destination against the configured pattern. A rule such as `write:docs/*` stays scoped to `docs/` if that directory becomes a symlink. For calls without a path or shell input, rule patterns match the JSON-encoded arguments, so `git_diff:*` covers every diff call. Permission rules files are protected from tool writes and must be regular files with one link. The loader rejects symlinks in the path below the project root or home directory.
+
 The mode gate is a tool-call filter, not an operating-system sandbox. It blocks protected paths and recognized critical operations, but cannot inspect all effects of an approved command, script, external tool, or a process already running. bi's own command and destructive-operation confirmations still apply after the mode gate, including in Bypass. Auto ships without a network reviewer and asks when its static policy cannot decide.
 
 ## System prompt

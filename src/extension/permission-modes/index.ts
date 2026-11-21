@@ -6,6 +6,7 @@ import { loadPermissionRules } from './rules.ts';
 import { MODE_ENTRY, restorePermissionMode } from './state.ts';
 import { discardPlanNote, planNotePath, writePlanNote } from './plan-note.ts';
 import { classifyShell } from './shell.ts';
+import { readGoalState } from '../../commands/goal/state.ts';
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'dontAsk' | 'bypassPermissions';
 const cycle: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'auto'];
@@ -94,7 +95,10 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
       const next = choice === 'Start in Edits' ? 'acceptEdits' : choice === 'Start in Manual' ? 'default' : undefined;
       if (next) {
         change(next, false);
-        return { entries: [...event.entries, { type: 'custom' as const, customType: MODE_ENTRY, data: { mode: next } }] };
+        const entries = [...event.entries, { type: 'custom' as const, customType: MODE_ENTRY, data: { mode: next } }];
+        const goal = readGoalState([...ctx.sessionManager.getBranch(), ...entries]);
+        if (goal?.status === 'active' || event.continue || event.context?.pendingMessages?.length || ctx.hasPendingMessages?.()) return { entries };
+        return { entries: [...entries, { type: 'custom_message' as const, customType: 'bi.plan-approval', content: `The plan in ${planNotePath(ctx.cwd, ctx.sessionManager.getSessionId())} was approved. Implement it now.`, display: false }], continue: true };
       }
       else if (choice === 'Discard the note') await discardPlanNote(ctx.cwd, ctx.sessionManager.getSessionId());
     } catch { /* Dismissal and UI errors leave Plan active. */ }

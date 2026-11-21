@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import path from 'node:path';
 import { BI_CONFIG } from '../config/index.ts';
+import { isProtectedWrite, resolvePermissionPath } from '../extension/permission-modes/paths.ts';
 import type { Args, Tool, ToolContext, ToolResult } from '../types/index.ts';
 
 const execFileAsync = promisify(execFile);
@@ -15,7 +17,7 @@ export function createGitTools(options: { defaultLogLimit?: number } = {}): Tool
     gitTool('git_status', 'Show working tree status', {}, async (_a, c) =>
       runGit(c, ['status', '--short', '--branch'])),
     gitTool('git_diff', 'Show working tree diff', { staged: 'boolean?' }, async (a, c) =>
-      runGit(c, a.staged === true ? ['diff', '--cached'] : ['diff'])),
+      runDiff(c, a.staged === true)),
     gitTool('git_log', 'Show recent commit history; the default limit comes from configuration.', { limit: 'number?' }, async (a, c) => {
       const limit = a.limit === undefined
         ? c.projectConfig?.git?.defaultLogLimit ?? defaultLogLimit
@@ -52,6 +54,53 @@ export function createGitTools(options: { defaultLogLimit?: number } = {}): Tool
       return runGit(c, ['add', '--', ...paths]);
     }),
   ];
+}
+
+async function runDiff(context: ToolContext, staged: boolean): Promise<ToolResult> {
+  try {
+    const options = { cwd: context.workingDirectory, encoding: 'utf8' as const, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, signal: context.signal };
+    const rootOutput = await execFileAsync('git', ['rev-parse', '--show-toplevel'], options);
+    const root = rootOutput.stdout.replace(/\n$/, '');
+    const args = ['-C', root, 'diff', '--raw', '-z', '--patch', '--no-ext-diff', '--no-textconv', ...(staged ? ['--cached'] : []), '--'];
+    const { stdout, stderr } = await execFileAsync('git', args, options);
+    if (!stdout) return { success: true, output: stderr.trimEnd() };
+
+    let cursor = 0;
+    let sensitive = false;
+    try {
+      while (cursor < stdout.length && stdout[cursor] !== '\0') {
+        const end = stdout.indexOf('\0', cursor);
+        if (end < 0) throw new Error('Cannot identify diff paths');
+        const header = stdout.slice(cursor, end);
+        const match = /^:\d{6} \d{6} [0-9a-f]+ [0-9a-f]+ ([ACDMRTUXB])\d*$/.exec(header);
+        if (!match) throw new Error('Cannot identify diff paths');
+        cursor = end + 1;
+        const count = match[1] === 'R' || match[1] === 'C' ? 2 : 1;
+        for (let i = 0; i < count; i++) {
+          const pathEnd = stdout.indexOf('\0', cursor);
+          if (pathEnd < 0 || pathEnd === cursor) throw new Error('Cannot identify diff paths');
+          const target = path.resolve(root, stdout.slice(cursor, pathEnd));
+          try {
+            if (isProtectedWrite(target) || isProtectedWrite(resolvePermissionPath(root, target))) sensitive = true;
+          } catch { sensitive = true; }
+          cursor = pathEnd + 1;
+        }
+      }
+      if (stdout[cursor] !== '\0') throw new Error('Cannot identify diff paths');
+    } catch {
+      sensitive = true;
+      const separator = stdout.indexOf('\0\0');
+      if (separator < 0) throw new Error('Cannot safely separate diff output');
+      cursor = separator + 1;
+    }
+    if (sensitive && !await context.confirmSensitiveRead?.('The diff contains sensitive paths or its paths could not be classified.')) {
+      return { success: false, error: 'Sensitive diff was not approved' };
+    }
+    return { success: true, output: [stdout.slice(cursor + 1).trimEnd(), stderr.trimEnd()].filter(Boolean).join('\n') };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { success: false, error: `Unable to inspect Git diff: ${message}` };
+  }
 }
 
 async function runGit(context: ToolContext, args: string[]): Promise<ToolResult> {

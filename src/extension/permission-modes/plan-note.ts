@@ -1,4 +1,5 @@
-import { constants, promises as fs } from 'node:fs';
+import { promises as fs } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isWithin, resolvePermissionPath } from './paths.ts';
 
@@ -15,10 +16,14 @@ export function planNotePath(cwd: string, sessionId: string): string {
 export async function writePlanNote(cwd: string, sessionId: string, content: string): Promise<string> {
   const file = planNotePath(cwd, sessionId);
   await fs.mkdir(path.dirname(file), { recursive: true });
-  // Revalidate after mkdir and immediately before opening. O_NOFOLLOW protects the final component.
-  if (planNotePath(cwd, sessionId) !== file) throw new Error('Plan note destination changed');
-  const handle = await fs.open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(content, 'utf8'); } finally { await handle.close(); }
+  const temporary = path.join(path.dirname(file), `.${sessionId}.${randomUUID()}.tmp`);
+  try {
+    await fs.writeFile(temporary, content, { flag: 'wx', mode: 0o600 });
+    if (planNotePath(cwd, sessionId) !== file) throw new Error('Plan note destination changed');
+    await fs.rename(temporary, file);
+  } finally {
+    await fs.unlink(temporary).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
+  }
   return file;
 }
 

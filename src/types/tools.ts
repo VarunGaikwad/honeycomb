@@ -6,6 +6,7 @@ export interface ToolContext {
   projectConfig?: ProjectConfig;
   signal?: AbortSignal;
   confirmDestructive?: (operation: string, target: string) => Promise<boolean>;
+  confirmSensitiveRead?: (description: string) => Promise<boolean>;
   confirmCommand?: (command: string) => Promise<boolean>;
   askUser?: (question: string) => Promise<string>;
   delegateAgent?: (task: string) => Promise<string>;

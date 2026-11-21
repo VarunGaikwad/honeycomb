@@ -53,6 +53,10 @@ export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionCont
             if (!ctx.hasUI || permissionModes?.mode === 'dontAsk') return false;
             try { return await ctx.ui.confirm(`Confirm ${operation}`, target); } catch { return false; }
           },
+          confirmSensitiveRead: async (description) => {
+            if (!ctx.hasUI || permissionModes?.mode === 'dontAsk') return false;
+            try { return await ctx.ui.confirm('Allow sensitive Git diff?', description); } catch { return false; }
+          },
           confirmCommand: async (command) => {
             if (!ctx.hasUI || permissionModes?.mode === 'dontAsk') return false;
             try { return await ctx.ui.confirm('Run shell command?', command); } catch { return false; }
