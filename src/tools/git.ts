@@ -6,6 +6,27 @@ import { isProtectedWrite, resolvePermissionPath } from '../extension/permission
 import type { Args, Tool, ToolContext, ToolResult } from '../types/index.ts';
 
 const execFileAsync = promisify(execFile);
+// Read operations must not refresh the on-disk index or invoke repo-configured helpers.
+const readOnlyFlags = ['--no-optional-locks', '--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'];
+
+async function disableWorktreeFilters(context: ToolContext, timeout = 30_000): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync('git', [...readOnlyFlags, 'config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|process|required)$'], {
+      cwd: context.workingDirectory, signal: context.signal, timeout,
+    });
+    return [...new Set(stdout.split('\0').filter(Boolean))].flatMap(key => {
+      if (!/^filter\.[^=\r\n]+\.(clean|process|required)$/.test(key)) throw new Error('Invalid Git filter key');
+      return ['-c', `${key}=${key.endsWith('.required') ? 'false' : ''}`];
+    });
+  } catch (error) {
+    if ((error as { code?: unknown }).code === 1) return [];
+    throw error;
+  }
+}
+
+export async function readGitStatus(context: ToolContext, args: string[], timeout = 30_000): Promise<ToolResult> {
+  return runGit(context, [...readOnlyFlags, ...await disableWorktreeFilters(context, timeout), 'status', ...args, '--ignore-submodules=all'], timeout);
+}
 
 /** Git tools use execFile (never a shell) and run only in the active directory. */
 export function createGitTools(options: { defaultLogLimit?: number } = {}): Tool<Args>[] {
@@ -15,7 +36,7 @@ export function createGitTools(options: { defaultLogLimit?: number } = {}): Tool
   }
   return [
     gitTool('git_status', 'Show working tree status', {}, async (_a, c) =>
-      runGit(c, ['status', '--short', '--branch'])),
+      readGitStatus(c, ['--short', '--branch'])),
     gitTool('git_diff', 'Show working tree diff', { staged: 'boolean?' }, async (a, c) =>
       runDiff(c, a.staged === true)),
     gitTool('git_log', 'Show recent commit history; the default limit comes from configuration.', { limit: 'number?' }, async (a, c) => {
@@ -25,7 +46,7 @@ export function createGitTools(options: { defaultLogLimit?: number } = {}): Tool
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
         return { success: false, error: 'limit must be an integer from 1 to 100' };
       }
-      return runGit(c, ['log', `-${limit}`, '--oneline', '--decorate']);
+      return runGit(c, [...readOnlyFlags, 'log', `-${limit}`, '--oneline', '--decorate']);
     }),
     gitTool('git_commit', 'Create a commit from staged changes', { message: 'string' }, async (a, c) => {
       const message = a.message as string;
@@ -34,7 +55,7 @@ export function createGitTools(options: { defaultLogLimit?: number } = {}): Tool
       return runGit(c, ['commit', '-m', message]);
     }),
     gitTool('git_branch', 'List branches or create a branch', { name: 'string?' }, async (a, c) => {
-      if (typeof a.name !== 'string') return runGit(c, ['branch', '--list']);
+      if (typeof a.name !== 'string') return runGit(c, [...readOnlyFlags, 'branch', '--list']);
       if (!validRef(a.name)) return { success: false, error: 'Invalid branch name' };
       if (!await approve(c, 'create git branch', a.name)) return { success: false, error: 'Branch creation was not approved' };
       return runGit(c, ['branch', '--', a.name]);
@@ -56,17 +77,21 @@ export function createGitTools(options: { defaultLogLimit?: number } = {}): Tool
   ];
 }
 
-async function runDiff(context: ToolContext, staged: boolean): Promise<ToolResult> {
+export async function runDiff(context: ToolContext, staged: boolean, selection?: { list: true } | { paths: string[] }): Promise<ToolResult> {
   try {
-    const options = { cwd: context.workingDirectory, encoding: 'utf8' as const, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, signal: context.signal };
-    const rootOutput = await execFileAsync('git', ['rev-parse', '--show-toplevel'], options);
+    const options = { cwd: context.workingDirectory, env: { ...process.env, GIT_NO_LAZY_FETCH: '1' }, encoding: 'utf8' as const, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, signal: context.signal };
+    const rootOutput = await execFileAsync('git', [...readOnlyFlags, 'rev-parse', '--show-toplevel'], options);
     const root = rootOutput.stdout.replace(/\n$/, '');
-    const args = ['-C', root, 'diff', '--raw', '-z', '--patch', '--no-ext-diff', '--no-textconv', ...(staged ? ['--cached'] : []), '--'];
+    const filters = staged ? [] : await disableWorktreeFilters(context);
+    const listing = selection && 'list' in selection;
+    const paths = selection && 'paths' in selection ? selection.paths : [];
+    const args = [...readOnlyFlags, ...filters, '--literal-pathspecs', '-C', root, 'diff', '--raw', '-z', ...(listing ? [] : ['--patch']), '--no-color', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', ...(staged ? ['--cached'] : []), '--', ...paths];
     const { stdout, stderr } = await execFileAsync('git', args, options);
     if (!stdout) return { success: true, output: stderr.trimEnd() };
 
     let cursor = 0;
     let sensitive = false;
+    const files: { status: string; paths: string[] }[] = [];
     try {
       while (cursor < stdout.length && stdout[cursor] !== '\0') {
         const end = stdout.indexOf('\0', cursor);
@@ -76,18 +101,24 @@ async function runDiff(context: ToolContext, staged: boolean): Promise<ToolResul
         if (!match) throw new Error('Cannot identify diff paths');
         cursor = end + 1;
         const count = match[1] === 'R' || match[1] === 'C' ? 2 : 1;
+        const names: string[] = [];
         for (let i = 0; i < count; i++) {
           const pathEnd = stdout.indexOf('\0', cursor);
           if (pathEnd < 0 || pathEnd === cursor) throw new Error('Cannot identify diff paths');
-          const target = path.resolve(root, stdout.slice(cursor, pathEnd));
+          const name = stdout.slice(cursor, pathEnd);
+          if (selection && name.includes('\uFFFD')) throw new Error('Unsupported Git filename encoding');
+          names.push(name);
+          const target = path.resolve(root, name);
           try {
             if (isProtectedWrite(target) || isProtectedWrite(resolvePermissionPath(root, target))) sensitive = true;
           } catch { sensitive = true; }
           cursor = pathEnd + 1;
         }
+        files.push({ status: match[1]!, paths: names });
       }
-      if (stdout[cursor] !== '\0') throw new Error('Cannot identify diff paths');
+      if (listing ? cursor !== stdout.length : stdout[cursor] !== '\0') throw new Error('Cannot identify diff paths');
     } catch {
+      if (listing || selection) throw new Error('Cannot safely classify diff paths');
       sensitive = true;
       const separator = stdout.indexOf('\0\0');
       if (separator < 0) throw new Error('Cannot safely separate diff output');
@@ -96,6 +127,7 @@ async function runDiff(context: ToolContext, staged: boolean): Promise<ToolResul
     if (sensitive && !await context.confirmSensitiveRead?.('The diff contains sensitive paths or its paths could not be classified.')) {
       return { success: false, error: 'Sensitive diff was not approved' };
     }
+    if (listing) return { success: true, metadata: { files } };
     return { success: true, output: [stdout.slice(cursor + 1).trimEnd(), stderr.trimEnd()].filter(Boolean).join('\n') };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -103,12 +135,13 @@ async function runDiff(context: ToolContext, staged: boolean): Promise<ToolResul
   }
 }
 
-async function runGit(context: ToolContext, args: string[]): Promise<ToolResult> {
+async function runGit(context: ToolContext, args: string[], timeout = 30_000): Promise<ToolResult> {
   try {
     const { stdout, stderr } = await execFileAsync('git', args, {
       cwd: context.workingDirectory,
+      ...(args[0] === '--no-optional-locks' ? { env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } } : {}),
       encoding: 'utf8',
-      timeout: 30_000,
+      timeout,
       maxBuffer: 10 * 1024 * 1024,
       signal: context.signal,
     });

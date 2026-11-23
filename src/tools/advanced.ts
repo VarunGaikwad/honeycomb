@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { isProtectedWrite, resolvePermissionPath } from '../extension/permission-modes/paths.ts';
+import { writeUnlinkedFile } from './write-file.ts';
 import type { Args, Tool, ToolContext, ToolResult } from '../types/index.ts';
 
 /** Persistent project-local memory and checkpoints, with optional host delegation. */
@@ -9,7 +11,7 @@ export function createAdvancedTools(): Tool<Args>[] {
     makeTool('memory', 'Read, write, or append project-local agent memory', {
       action: 'string', content: 'string?',
     }, async (a, c) => {
-      const file = await stateFile(c, 'memory.json');
+      const file = checkedStatePath(await stateDir(c, ''), 'memory.json');
       const data = await readJson(file, { entries: [] as string[] });
       if (a.action === 'read') return { success: true, output: data.entries.join('\n') };
       if (a.action !== 'write' && a.action !== 'append') return { success: false, error: 'action must be read, write, or append' };
@@ -25,7 +27,7 @@ export function createAdvancedTools(): Tool<Args>[] {
       await fs.mkdir(dir, { recursive: true });
       if (a.action === 'list') {
         const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.json')).sort();
-        const checkpoints = await Promise.all(files.map((f) => readJson(path.join(dir, f), null)));
+        const checkpoints = await Promise.all(files.map((f) => readJson(checkedStatePath(dir, f), null)));
         return { success: true, output: checkpoints.map((p: any) => `${p.id} ${p.label} (${p.files.length} files)`).join('\n') };
       }
       if (a.action !== 'create') return { success: false, error: 'action must be create or list' };
@@ -44,7 +46,7 @@ export function createAdvancedTools(): Tool<Args>[] {
         createdAt: new Date().toISOString(),
         files,
       };
-      await writeJson(path.join(dir, `${checkpoint.id}.json`), checkpoint);
+      await writeJson(checkedStatePath(dir, `${checkpoint.id}.json`), checkpoint);
       return { success: true, output: checkpoint.id, metadata: { fileCount: files.length } };
     }),
     makeTool('subagent', 'Delegate a task to a host-provided specialized agent', {
@@ -88,13 +90,13 @@ async function stateDir(context: ToolContext, name: string): Promise<string> {
   const dir = path.join(root, '.pi', name);
   const rel = path.relative(root, dir);
   if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid state directory');
-  return dir;
+  return checkedStatePath(root, path.relative(root, dir));
 }
 
-async function stateFile(context: ToolContext, name: string): Promise<string> {
-  const dir = await stateDir(context, '');
-  await fs.mkdir(dir, { recursive: true });
-  return path.join(dir, name);
+function checkedStatePath(root: string, name: string): string {
+  const target = path.join(root, name);
+  if (isProtectedWrite(target) || resolvePermissionPath(root, target) !== target) throw new Error('Unsafe project state path');
+  return target;
 }
 
 async function safeFile(context: ToolContext, input: string): Promise<string> {
@@ -110,6 +112,8 @@ async function safeFile(context: ToolContext, input: string): Promise<string> {
 
 async function readJson<T>(file: string, fallback: T): Promise<T> {
   try {
+    const stat = await fs.lstat(file);
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error('Unsafe project state file');
     return JSON.parse(await fs.readFile(file, 'utf8')) as T;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback;
@@ -119,5 +123,5 @@ async function readJson<T>(file: string, fallback: T): Promise<T> {
 
 async function writeJson(file: string, data: unknown): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+  await writeUnlinkedFile(file, `${JSON.stringify(data, null, 2)}\n`);
 }

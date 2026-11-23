@@ -6,6 +6,7 @@ import { ToolDispatcher } from './dispatcher.ts';
 import { createExecutionTools } from './execution.ts';
 import { createFileSystemTools } from './filesystem.ts';
 import { createGitTools } from './git.ts';
+import { createUndoJournal } from './undo-journal.ts';
 import { ToolRegistry } from './registry.ts';
 
 /** Build a registry containing the configured tool groups. */
@@ -19,11 +20,12 @@ export function createToolSystem(options: { askUser?: AskUserFn; config?: BiConf
     timeoutMs: config.execution.timeoutMs,
     maxOutputChars: config.output.maxChars,
   });
+  const journal = config.toolGroups.agent ? createUndoJournal() : undefined;
   const tools = [
-    ...(config.toolGroups.filesystem ? createFileSystemTools(config.filesystem) : []),
+    ...(config.toolGroups.filesystem ? createFileSystemTools({ ...config.filesystem, journal }) : []),
     ...(config.toolGroups.execution ? execution.tools : []),
     ...(config.toolGroups.git ? createGitTools(config.git) : []),
-    ...(config.toolGroups.agent ? createAgentTools(options) : []),
+    ...(config.toolGroups.agent ? createAgentTools({ ...options, journal }) : []),
     ...(config.toolGroups.advanced ? createAdvancedTools() : []),
   ];
   for (const tool of tools) registry.register(tool);

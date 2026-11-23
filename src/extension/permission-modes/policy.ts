@@ -119,6 +119,10 @@ export function decidePermission(mode: string, toolName: string, input: unknown,
       if (typeof target !== 'string' || containsProtectedDescendant(cwd, target)) return result('deny', 'Directory contains protected paths');
     } catch { return result('deny', 'Unable to classify directory safely'); }
   }
+  if (toolName === 'terminal' && !(typeof args.input === 'string'
+    ? args.command === undefined && typeof args.processId === 'string' && !!args.processId
+    : args.input === undefined && args.processId === undefined && typeof args.command === 'string'))
+    return result('deny', 'Invalid terminal arguments');
   const shellTool = ['bash', 'background', 'terminal'].includes(toolName);
   let shellUnknown = false;
   if (shellTool && typeof args.command === 'string') {
@@ -153,13 +157,14 @@ export function decidePermission(mode: string, toolName: string, input: unknown,
   const listBranches = toolName === 'git_branch' && args.name === undefined;
   if (mode === 'plan' && !listBranches && ![...readTools, 'git_status', 'git_diff', 'git_log', 'goal_report', 'todo', 'plan', 'ask_user', 'plan_note'].includes(toolName))
     return result('deny', 'Plan mode blocks mutation, execution and delegation');
-  const matches = (items?: string[]) => items?.some(rule => matchesRule(toolName, args, rule, cwd)) ?? false;
+  const matches = (items?: string[]) => items?.some(rule => matchesRule(toolName, readPath === undefined ? args : { ...args, path: readPath }, rule, cwd)) ?? false;
   if (matches(rules.deny)) return result('deny', 'Denied by permission rule', 'rule');
   if (matches(rules.ask)) return result(mode === 'dontAsk' ? 'deny' : 'ask', 'Requires approval by permission rule', 'rule');
   if (shellUnknown) return result(mode === 'dontAsk' ? 'deny' : 'ask', 'Unclassified shell command requires approval');
   if (sensitive || outside) return result(mode === 'dontAsk' ? 'deny' : 'ask', 'Sensitive or outside path requires approval');
   // Recursive grep reads every file, including credentials nested below the root.
   if (toolName === 'grep') return result(mode === 'dontAsk' ? 'deny' : 'ask', 'Recursive search may read sensitive files');
+  if (mode === 'dontAsk' && toolName === 'ask_user') return result('deny', 'No prompts mode blocks interactive questions');
   if (toolName === 'plan_note') return mode === 'plan' ? result('allow', 'Session plan note') : result('deny', 'Plan note is available only in Plan mode');
   if (listBranches || [...readTools, 'git_status', 'git_diff', 'git_log', 'goal_report', 'todo', 'plan', 'ask_user', 'process'].includes(toolName)) return result('allow', 'Read or session bookkeeping');
   const ordinaryEdit = ['write', 'edit', 'mkdir', 'apply_patch', 'copy', 'move'].includes(toolName);

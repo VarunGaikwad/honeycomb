@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { createUndoJournal, type UndoJournal } from './undo-journal.ts';
+import { isProtectedWrite } from '../extension/permission-modes/paths.ts';
+import { atomicReplace } from './filesystem.ts';
+import { writeUnlinkedFile } from './write-file.ts';
 import type {
   AgentToolDefinition,
   AskQuestion,
@@ -14,18 +18,21 @@ import type {
 } from '../types/index.ts';
 
 /** In-memory agent helpers; undo only restores files unchanged since its own edit. */
-export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Args>[] {
-  const todos: Todo[] = [];
-  const undoStack: UndoEntry[] = [];
+export function createAgentTools(options: { askUser?: AskUserFn; journal?: UndoJournal } = {}): Tool<Args>[] {
+  const fallbackTodos: Todo[] = [];
+  const journal = options.journal ?? createUndoJournal();
+  const undoStack = journal.entries;
   const definitions: AgentToolDefinition[] = [
     {
       name: 'todo',
       description:
-        'Track progress on multi-step tasks (3+ steps). action: "list" | "add" (requires text) | "complete" | "remove" (both require id from add/list). In-memory, current session only.',
+        'Track progress on multi-step tasks (3+ steps). action: "list" | "add" (requires text) | "complete" | "remove" (both require id from add/list). In Pi, follows the current session branch.',
       promptGuideline:
         'Use todo for tasks with several distinct steps; skip it for single quick edits. Mark items complete as soon as they are done.',
       shape: { action: 'string', text: 'string?', id: 'string?' },
-      execute: async (a: Args) => {
+      execute: async (a: Args, context) => {
+        const store = context.todoStore;
+        const todos = store?.read() ?? fallbackTodos;
         const action = a.action as string;
         if (!['list', 'add', 'complete', 'remove'].includes(action))
           return { success: false, error: 'action must be list, add, complete, or remove' };
@@ -40,7 +47,9 @@ export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Ar
           if (typeof a.text !== 'string' || !a.text.trim())
             return { success: false, error: 'text is required to add a todo' };
           const item = { id: randomUUID(), text: a.text, done: false };
+          if (todos.length >= 100 || a.text.length > 1000) return { success: false, error: 'Todo limit exceeded' };
           todos.push(item);
+          store?.write(todos);
           return { success: true, output: item.id };
         }
         if (typeof a.id !== 'string' || !a.id)
@@ -49,6 +58,7 @@ export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Ar
         if (index < 0) return { success: false, error: 'Todo not found' };
         if (action === 'complete') todos[index].done = true;
         else if (action === 'remove') todos.splice(index, 1);
+        store?.write(todos);
         return { success: true, output: 'Todo updated' };
       },
     },
@@ -164,7 +174,7 @@ export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Ar
             if (!edit.oldText) throw new Error(`oldText must not be empty (${edit.path})`);
             const file = await safeFile(c, edit.path);
             const st = await fs.stat(file, { bigint: true });
-            if (!st.isFile()) throw new Error(`Not a regular file: ${edit.path}`);
+            if (!st.isFile() || st.nlink !== 1n) throw new Error(`Not a regular single-link file: ${edit.path}`);
             // ino 0 kuch filesystems pe aata hai (unreliable) → tab real path fallback
             const key = st.ino !== 0n ? `${st.dev}:${st.ino}` : file;
             const prev = seen.get(key);
@@ -193,7 +203,7 @@ export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Ar
             if (text.indexOf(edit.oldText, at + 1) >= 0)
               throw new Error(`Match is not unique in ${edit.path}`);
             const updated = text.slice(0, at) + edit.newText + text.slice(at + edit.oldText.length);
-            await fs.writeFile(edit.file, updated, 'utf8');
+            await writeUnlinkedFile(edit.file, updated);
             pending.push({
               id: operationId,
               file: edit.file,
@@ -206,7 +216,7 @@ export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Ar
           for (const entry of pending.reverse()) {
             try {
               if (hash(await fs.readFile(entry.file)) === entry.afterHash) {
-                if (entry.before) await fs.writeFile(entry.file, entry.before);
+                if (entry.before) await writeUnlinkedFile(entry.file, entry.before);
                 else await fs.rm(entry.file);
               }
             } catch {
@@ -215,7 +225,7 @@ export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Ar
           }
           return { success: false, error: error instanceof Error ? error.message : 'Patch failed' };
         }
-        undoStack.push(...pending);
+        journal.record(c, pending);
         return {
           success: true,
           output: `Applied ${pending.length} edit(s)`,
@@ -226,18 +236,25 @@ export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Ar
     {
       name: 'undo',
       description:
-        'Revert the most recent apply_patch operation (all files in it). Each call reverts one operation; call again to go further back. Refuses if any affected file changed since that patch.',
+        'Revert the most recent tracked Bi file operation (all files in it). Each call reverts one operation; call again to go further back. Refuses if any affected file changed since that patch.',
       promptGuideline:
-        'Use when the user asks to revert, or when your own last patch was wrong. If undo refuses, fix forward with apply_patch instead. Cannot undo edits from edit, write, or shell commands.',
+        'Use when the user asks to revert, or when your own last patch was wrong. If undo refuses, fix forward with apply_patch instead. Cannot undo shell commands or untracked changes.',
       shape: {},
-      execute: async () => {
+      execute: async (_a, c) => {
+        const key = journal.select(c);
         if (!undoStack.length)
           return { success: false, error: 'No agent edits are available to undo' };
         const lastId = undoStack[undoStack.length - 1].id;
         const entries = undoStack.filter((entry) => entry.id === lastId);
+        const preflight = async (): Promise<ToolResult | undefined> => {
+          if (!journal.current(key) || undoStack.at(-1)?.id !== lastId || c.signal?.aborted ||
+            (c.checkUndo && !c.checkUndo(entries))) return { success: false, error: 'Restore is no longer permitted' };
         for (const entry of entries) {
           let current: Buffer;
           try {
+            if (isProtectedWrite(entry.file) || await safeFile(c, entry.file) !== entry.file) return { success: false, error: 'Restore path is no longer safe' };
+            const stat = await fs.lstat(entry.file);
+            if (!stat.isFile() || stat.nlink !== 1) return { success: false, error: `Cannot undo: ${entry.file} is not a regular single-link file` };
             current = await fs.readFile(entry.file);
           } catch {
             return { success: false, error: `Cannot undo: ${entry.file} is missing` };
@@ -248,11 +265,51 @@ export function createAgentTools(options: { askUser?: AskUserFn } = {}): Tool<Ar
               error: `Cannot undo: ${entry.file} changed since the agent edit`,
             };
         }
-        while (undoStack.length && undoStack[undoStack.length - 1].id === lastId) undoStack.pop();
-        for (const entry of [...entries].reverse()) {
-          if (entry.before) await fs.writeFile(entry.file, entry.before);
-          else await fs.rm(entry.file);
+        };
+        const blocked = await preflight();
+        if (blocked) return blocked;
+        if (c.checkUndo && !await c.confirmDestructive?.('rewind last file operation', entries.map(entry => `${entry.before === null ? 'Remove' : 'Restore'}: ${entry.file}`).join('\n'))) return { success: false, error: 'Restore was not approved' };
+        const stale = await preflight();
+        if (stale) return stale;
+        const restored: { entry: UndoEntry; previous: Buffer; mode: number }[] = [];
+        const inspect = async (file: string, expected: string) => {
+          const stat = await fs.lstat(file);
+          if (!stat.isFile() || stat.nlink !== 1 || await safeFile(c, file) !== file) throw new Error('Unsafe path');
+          const bytes = await fs.readFile(file);
+          if (hash(bytes) !== expected) throw new Error('File changed');
+          return { bytes, mode: stat.mode };
+        };
+        try {
+          for (const entry of [...entries].reverse()) {
+            const { bytes, mode } = await inspect(entry.file, entry.afterHash);
+            const validate = async () => {
+              if (!journal.current(key) || c.signal?.aborted || (c.checkUndo && !c.checkUndo(entries))) throw new Error('Permission changed');
+              if ((await inspect(entry.file, entry.afterHash)).mode !== mode) throw new Error('File mode changed');
+            };
+            if (entry.before === null) { await validate(); await fs.unlink(entry.file); }
+            else await atomicReplace(entry.file, entry.before, mode, validate);
+            restored.push({ entry, previous: bytes, mode });
+          }
+        } catch {
+          let remaining = restored.length;
+          for (const { entry, previous, mode } of restored.reverse()) {
+            if (!entry.before) continue;
+            try {
+              if (c.checkUndo && !c.checkUndo(entries)) continue;
+              const validate = async () => {
+                if (c.checkUndo && !c.checkUndo(entries)) throw new Error('Permission changed');
+                if ((await inspect(entry.file, hash(entry.before!))).mode !== mode) throw new Error('File mode changed');
+              };
+              await validate();
+              await atomicReplace(entry.file, previous, mode, validate);
+              remaining--;
+            } catch { /* Do not overwrite a file changed after restore. */ }
+          }
+          return { success: false, error: remaining ? `Restore failed; ${remaining} file(s) could not be rolled back. Inspect the affected files.` : 'Restore failed; no restored changes remain.' };
+        } finally {
+          journal.invalidateSnapshots?.(c, entries.map(entry => entry.file));
         }
+        while (undoStack.length && undoStack.at(-1)?.id === lastId) undoStack.pop();
         return { success: true, output: `Undid ${entries.length} edit(s)` };
       },
     },

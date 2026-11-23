@@ -1,6 +1,11 @@
 import type { ProjectConfig } from '../config/project.ts';
 
+import type { Todo, UndoEntry } from './agent.ts';
+
 export interface ToolContext {
+  undoEpoch?: number;
+  checkUndo?: (entries: UndoEntry[]) => boolean;
+  todoStore?: { read(): Todo[]; write(items: Todo[]): void };
   sessionId: string;
   workingDirectory: string;
   projectConfig?: ProjectConfig;

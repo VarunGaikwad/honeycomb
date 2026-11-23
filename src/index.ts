@@ -3,12 +3,17 @@ import { BI_CONFIG } from './config/index.ts';
 import { ensureProjectConfig, loadProjectConfig } from './config/project.ts';
 import { ensureQuietStartup, registerSystemInstruction, registerTools } from './extension/index.ts';
 import {
+  registerBtwCommand,
+  registerDiffCommand,
+  registerDoctorCommand,
   registerGoalCommand,
   registerInitCommand,
   registerReviewCommand,
   registerSimplifyCommand,
+  registerTasksCommand,
 } from './commands/index.ts';
 import { installTui } from './tui/index.ts';
+import { registerWorkingFeedback } from './tui/working-feedback.ts';
 import { createPermissionModes } from './extension/permission-modes/index.ts';
 
 // Pi extension entry point.
@@ -18,19 +23,26 @@ export default function (pi: ExtensionAPI) {
   const permissionModes = createPermissionModes(pi);
   registerTools(pi, permissionModes);
   registerSystemInstruction(pi, permissionModes);
+  registerBtwCommand(pi, permissionModes);
+  registerDiffCommand(pi, permissionModes);
+  registerDoctorCommand(pi, permissionModes);
   registerInitCommand(pi);
   registerGoalCommand(pi);
   registerReviewCommand(pi);
   registerSimplifyCommand(pi);
+  registerTasksCommand(pi);
+  registerWorkingFeedback(pi);
 
   pi.on('session_start', async (_event, ctx) => {
-    if (ctx.mode === 'tui') installTui(ctx, undefined, permissionModes);
-    await ensureProjectConfig(ctx.cwd);
-    const projectConfig = await loadProjectConfig(ctx.cwd);
-    await ensureQuietStartup(
-      ctx.cwd,
-      projectConfig.startup?.autoEnableQuietStartup ?? BI_CONFIG.startup.autoEnableQuietStartup,
-    );
-    ctx.ui.notify(BI_CONFIG.ui.startupMessage, 'info');
+    if (ctx.mode === 'tui') installTui(ctx, permissionModes);
+    if (permissionModes.mode !== 'plan') {
+      await ensureProjectConfig(ctx.cwd);
+      const projectConfig = await loadProjectConfig(ctx.cwd);
+      await ensureQuietStartup(
+        ctx.cwd,
+        projectConfig.startup?.autoEnableQuietStartup ?? BI_CONFIG.startup.autoEnableQuietStartup,
+      );
+    }
+    if (ctx.mode !== 'tui') ctx.ui.notify(BI_CONFIG.ui.startupMessage, 'info');
   });
 }

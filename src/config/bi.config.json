@@ -25,19 +25,20 @@
   },
   "ui": {
     "startupMessage": "bi extension loaded",
+    "workingTips": { "enabled": true, "delayMs": 20000 },
     "tagline": "Let's build something great",
-    "gettingStartedTitle": "Getting started",
+    "gettingStartedTitle": "Tips for getting started",
     "gettingStarted": "Describe a task in plain words.",
     "commandsTitle": "Commands",
     "keysTitle": "Keys",
     "commands": [
-      { "command": "/init", "description": "set up project context" }
+      { "command": "/init", "description": "set up project context" },
+      { "command": "/permissions", "description": "view rules and denials" }
     ],
     "keys": [
       { "key": "esc", "description": "interrupt" },
       { "key": "ctrl+l", "description": "switch model" },
-      { "key": "shift+tab", "description": "thinking level" },
-      { "key": "alt+m", "description": "cycle permission mode" }
+      { "key": "shift+tab", "description": "cycle permission mode" }
     ]
   },
   "systemPrompt": {

@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { constants, promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isWithin, resolvePermissionPath } from './paths.ts';
@@ -13,7 +13,32 @@ export function planNotePath(cwd: string, sessionId: string): string {
   return file;
 }
 
+export const MAX_PLAN_BYTES = 64 * 1024;
+
+export async function readPlanNote(cwd: string, sessionId: string): Promise<string | undefined> {
+  const file = planNotePath(cwd, sessionId);
+  let handle;
+  try { handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_PLAN_BYTES || planNotePath(cwd, sessionId) !== file) return undefined;
+    const buffer = Buffer.alloc(MAX_PLAN_BYTES + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    return length <= MAX_PLAN_BYTES ? buffer.toString('utf8', 0, length) : undefined;
+  } finally { await handle.close(); }
+}
+
 export async function writePlanNote(cwd: string, sessionId: string, content: string): Promise<string> {
+  if (Buffer.byteLength(content) > MAX_PLAN_BYTES) throw new Error('Plan note is limited to 64 KiB');
   const file = planNotePath(cwd, sessionId);
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temporary = path.join(path.dirname(file), `.${sessionId}.${randomUUID()}.tmp`);

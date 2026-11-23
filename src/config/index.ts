@@ -28,6 +28,7 @@ export interface BiConfig {
   };
   ui: {
     startupMessage: string;
+    workingTips: { enabled: boolean; delayMs: number };
     tagline: string;
     gettingStartedTitle: string;
     gettingStarted: string;

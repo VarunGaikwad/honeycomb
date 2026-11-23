@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { MAX_UNDO_FILE_BYTES, type UndoJournal } from './undo-journal.ts';
+import { writeUnlinkedFile } from './write-file.ts';
 import { BI_CONFIG } from '../config/index.ts';
 import { CONFIG_LIMITS } from '../config/limits.ts';
 import type { Args, Tool, ToolContext } from '../types/index.ts';
@@ -18,6 +20,7 @@ interface FileSnapshot {
  * working directory, and resolved paths (including symlinks) must stay inside it.
  */
 export function createFileSystemTools(options: {
+  journal?: UndoJournal;
   defaultReadLimit?: number;
   maxReadLineLength?: number;
   maxGrepMatches?: number;
@@ -36,6 +39,10 @@ export function createFileSystemTools(options: {
     throw new Error(`filesystem.maxGrepMatches must be an integer from 1 to ${CONFIG_LIMITS.maxGrepMatches}`);
   }
   const snapshots = new Map<string, Map<string, FileSnapshot>>();
+  if (options.journal) options.journal.invalidateSnapshots = (ctx, files) => {
+    const saved = snapshots.get(ctx.sessionId);
+    for (const file of files) saved?.delete(file);
+  };
   return [
     tool('read', 'Read a UTF-8 text file by line range. offset is 1-indexed; the default limit and line truncation length come from configuration.', {
       path: 'string', offset: 'number?', limit: 'number?',
@@ -74,10 +81,21 @@ export function createFileSystemTools(options: {
     tool('write', 'Create or overwrite a UTF-8 text file', { path: 'string', content: 'string' }, async (a, c) => {
       const file = await resolvePath(c, stringArg(a, 'path'), true);
       await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, stringArg(a, 'content'), 'utf8');
+      const content = stringArg(a, 'content');
+      let before: Buffer | null | undefined;
+      if (options.journal && Buffer.byteLength(content) <= MAX_UNDO_FILE_BYTES) {
+        try {
+          const stat = await fs.lstat(file);
+          if (stat.isFile() && stat.nlink === 1 && stat.size <= MAX_UNDO_FILE_BYTES) before = await fs.readFile(file);
+        } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') before = null; }
+      }
+      await writeUnlinkedFile(file, content);
+      options.journal?.record(c, before === undefined || before?.includes(0) ? [] : [{
+        id: randomUUID(), file, before, afterHash: sha256(Buffer.from(content)),
+      }]);
       return { success: true, output: `Wrote ${file}` };
     }),
-    createEditTool(snapshots),
+    createEditTool(snapshots, options.journal),
     tool('ls', 'List directory entries', { path: 'string?' }, async (a, c) => {
       const dir = await resolvePath(c, optionalString(a, 'path') ?? '.');
       const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -160,7 +178,7 @@ export function createFileSystemTools(options: {
   ];
 }
 
-function createEditTool(snapshots: Map<string, Map<string, FileSnapshot>>): Tool<Args> {
+function createEditTool(snapshots: Map<string, Map<string, FileSnapshot>>, journal?: UndoJournal): Tool<Args> {
   return {
     name: 'edit',
     description: 'Replace exact text in a file that was read in this session. Read the file first; edits fail if it has not been read or has changed since reading. old_str must be unique unless replace_all is true; add more context if it is ambiguous. Use replace_all for intentional renames and edits for multiple non-overlapping changes in one file. Each edit matches the original file content. In mixed-ending files, inserted newlines use the first newline style found; untouched line endings are preserved.',
@@ -199,7 +217,7 @@ function createEditTool(snapshots: Map<string, Map<string, FileSnapshot>>): Tool
       }
       return true;
     },
-    execute: (args, context) => executeEdit(args, context, snapshots),
+    execute: (args, context) => executeEdit(args, context, snapshots, journal),
   };
 }
 
@@ -225,6 +243,7 @@ async function executeEdit(
   input: Args,
   context: ToolContext,
   snapshots: Map<string, Map<string, FileSnapshot>>,
+  journal?: UndoJournal,
 ) {
   const normalized = normalizeLegacyParams(input);
   if (normalized.error) return { success: false, error: normalized.error };
@@ -374,6 +393,7 @@ async function executeEdit(
   } catch (error) {
     return { success: false, error: `edit: could not write ${inputPath}: ${errorMessage(error)}` };
   }
+  journal?.record(context, stat.nlink !== 1 || outputBytes.length > MAX_UNDO_FILE_BYTES ? [] : [{ id: randomUUID(), file, before: bytes, afterHash: sha256(outputBytes) }]);
   sessionSnapshots.set(file, snapshot(await fs.stat(file), outputBytes));
 
   const diff = unifiedDiff(original, updated, inputPath);
@@ -407,7 +427,7 @@ function lineNumberAt(text: string, position: number): number {
   return line;
 }
 
-async function atomicReplace(file: string, contents: Buffer, mode: number): Promise<void> {
+export async function atomicReplace(file: string, contents: Buffer, mode: number, validate?: () => Promise<void>): Promise<void> {
   const target = await fs.realpath(file);
   const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${randomUUID()}.tmp`);
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
@@ -418,6 +438,7 @@ async function atomicReplace(file: string, contents: Buffer, mode: number): Prom
     await handle.close();
     handle = undefined;
     await fs.chmod(temp, mode & 0o7777);
+    await validate?.();
     await fs.rename(temp, target);
   } catch (error) {
     if (handle) await handle.close().catch(() => undefined);

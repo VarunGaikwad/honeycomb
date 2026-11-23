@@ -1,11 +1,14 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { readFile } from 'node:fs/promises';
 import { Type } from 'typebox';
+import { createPermissionPrompter } from '../../tui/permission-dialog.ts';
+import { registerPermissionRules, type PermissionActivity } from '../../tui/permission-rules.ts';
 import { decidePermission } from './policy.ts';
 import { loadPermissionRules } from './rules.ts';
 import { MODE_ENTRY, restorePermissionMode } from './state.ts';
-import { discardPlanNote, planNotePath, writePlanNote } from './plan-note.ts';
+import { discardPlanNote, MAX_PLAN_BYTES, planNotePath, readPlanNote, writePlanNote } from './plan-note.ts';
+import { previewToolCall } from './preview.ts';
 import { classifyShell } from './shell.ts';
+import { resolvePermissionPath } from './paths.ts';
 import { readGoalState } from '../../commands/goal/state.ts';
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'dontAsk' | 'bypassPermissions';
@@ -18,68 +21,111 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
+function approvalKey(cwd: string, tool: string, args: Record<string, unknown>): string {
+  const paths: unknown[] = [args.path, args.source, args.destination];
+  if (tool === 'apply_patch' && Array.isArray(args.edits)) {
+    for (const edit of args.edits) if (edit && typeof edit === 'object') paths.push(edit.path);
+  }
+  if (['ls', 'grep', 'find'].includes(tool) && args.path === undefined) paths.push('.');
+  if (['bash', 'background', 'terminal'].includes(tool) && typeof args.command === 'string') {
+    const shell = classifyShell(args.command, cwd);
+    if (shell.kind === 'read') paths.push(...shell.paths);
+  }
+  const resolved = paths.filter((target): target is string => typeof target === 'string').map(target => resolvePermissionPath(cwd, target));
+  return JSON.stringify(canonical([cwd, tool, args, resolved]));
+}
+
 export type PermissionReviewer = (summary: { tool: 'bash'; operation: 'pwd' }) => Promise<'allow' | 'deny' | 'ask'>;
 export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: PermissionReviewer; reviewerTimeoutMs?: number } = {}) {
   let mode: PermissionMode = 'default';
   let launchMode: string | undefined;
   let bypassConfirmed = false;
   let priorTools: string[] | undefined;
-  let noteChanged = false;
+  let pendingPlan: string | undefined;
+  let epoch = 0;
   let turnDeclines = 0, sessionDeclines = 0;
   const listeners = new Set<() => void>();
   const approvals = new Set<string>();
+  const denials: PermissionActivity[] = [];
+  const prompter = createPermissionPrompter();
+  const block = (tool: string, reason: string) => {
+    denials.unshift({ tool, reason });
+    if (denials.length > 20) denials.pop();
+    return { block: true as const, reason };
+  };
   pi.registerFlag?.('permission-mode', { description: 'Permission mode (default, acceptEdits, plan, auto, dontAsk, bypassPermissions)', type: 'string' });
   const allowed = (value: string): value is PermissionMode => cycle.includes(value as PermissionMode) ||
     (value === 'dontAsk' && launchMode === value) || (value === 'bypassPermissions' && launchMode === value && bypassConfirmed);
   const change = (next: PermissionMode, persist = true) => {
     if (!allowed(next)) return false;
     if (mode !== 'plan' && next === 'plan' && pi.getActiveTools && pi.setActiveTools) {
-      priorTools = pi.getActiveTools();
+      priorTools = pi.getActiveTools().filter(name => name !== 'plan_note');
       pi.setActiveTools([...priorTools.filter(name => planTools.has(name)), 'plan_note']);
     } else if (mode === 'plan' && next !== 'plan' && priorTools && pi.setActiveTools) {
       pi.setActiveTools(priorTools); priorTools = undefined;
     }
-    mode = next; approvals.clear();
+    mode = next;
+    epoch++;
+    approvals.clear();
+    if (next !== 'plan') pendingPlan = undefined;
     if (persist) pi.appendEntry?.(MODE_ENTRY, { mode: next });
     for (const fn of listeners) fn();
     return true;
   };
+  const cycleMode = () => { change(cycle[(cycle.indexOf(mode) + 1) % cycle.length]!); };
+  registerPermissionRules(pi, () => ({ mode: labels[mode], approvals: approvals.size, denials }));
   pi.registerTool?.({
     name: 'plan_note', label: 'Plan note', description: 'Write the current session plan note in Plan mode.',
     defaultActive: false,
-    parameters: Type.Object({ content: Type.String() }),
-    async execute(_id, args, _signal, _update, ctx) {
+    executionMode: 'sequential',
+    parameters: Type.Object({ content: Type.String({ maxLength: MAX_PLAN_BYTES }) }),
+    async execute(_id, args, signal, _update, ctx) {
       if (mode !== 'plan') throw new Error('Plan note is available only in Plan mode');
+      const started = epoch;
       const sessionId = ctx.sessionManager.getSessionId();
-      const previous = await readFile(planNotePath(ctx.cwd, sessionId), 'utf8').catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error; });
+      const previous = await readPlanNote(ctx.cwd, sessionId);
+      if (started !== epoch || signal?.aborted) throw new Error('Plan note write was cancelled');
       const file = await writePlanNote(ctx.cwd, sessionId, args.content);
-      if (previous !== args.content) noteChanged = true;
+      if (started === epoch && previous !== args.content) pendingPlan = args.content;
       return { content: [{ type: 'text', text: `Plan saved to ${file}` }], details: {} };
     },
   });
-  pi.on('session_start', async (_event, ctx) => {
-    approvals.clear(); noteChanged = false; priorTools = undefined; mode = 'default'; turnDeclines = 0; sessionDeclines = 0;
+  pi.on('session_start', async (event, ctx) => {
+    epoch++;
+    approvals.clear(); denials.length = 0; pendingPlan = undefined; priorTools = undefined; mode = 'default'; turnDeclines = 0; sessionDeclines = 0;
     launchMode = pi.getFlag?.('permission-mode') as string | undefined;
     bypassConfirmed = false;
     if (launchMode && ![...cycle, 'dontAsk', 'bypassPermissions'].includes(launchMode as PermissionMode)) throw new Error(`Invalid permission mode: ${launchMode}`);
     if (launchMode === 'bypassPermissions') {
-      if (!ctx.hasUI || !await ctx.ui.confirm('Enable Bypass mode?', 'Routine mode prompts will be skipped; existing safety checks still apply.')) throw new Error('Bypass mode requires interactive confirmation');
-      bypassConfirmed = true;
+      if (!ctx.hasUI) throw new Error('Bypass mode requires interactive confirmation');
+      bypassConfirmed = await prompter.confirm(ctx, 'Enable Bypass mode?', 'Routine mode prompts will be skipped; existing safety checks still apply.');
+      if (!bypassConfirmed) {
+        launchMode = undefined;
+        ctx.ui.notify('Bypass was not enabled. Staying in Manual mode.', 'warning');
+        change('default');
+        return;
+      }
     }
     const restored = restorePermissionMode(ctx.sessionManager?.getBranch?.() ?? []);
     const config = loadPermissionRules(ctx.cwd, message => { if (ctx.hasUI) ctx.ui.notify(message, 'warning'); else console.warn(message); });
-    const next = launchMode ?? (restored && allowed(restored) ? restored : undefined) ?? config.defaultMode ?? 'default';
-    change(allowed(next) ? next : 'default', !!launchMode || !restored || !allowed(restored));
+    const saved = restored && allowed(restored) ? restored : undefined;
+    const next = (event.reason === 'reload' ? saved ?? launchMode : launchMode ?? saved) ?? config.defaultMode ?? 'default';
+    change(allowed(next) ? next : 'default', next !== saved);
   });
-  pi.on('session_shutdown', () => { approvals.clear(); });
+  pi.on('session_shutdown', event => {
+    epoch++;
+    approvals.clear();
+    // Pi snapshots the active tools after shutdown when rebuilding on reload.
+    if (event.reason === 'reload' && mode === 'plan' && priorTools) pi.setActiveTools(priorTools);
+  });
   pi.on('session_tree', (_event, ctx) => {
-    approvals.clear(); noteChanged = false;
+    approvals.clear(); denials.length = 0; pendingPlan = undefined;
     const restored = restorePermissionMode(ctx?.sessionManager?.getBranch?.() ?? []);
     const config = ctx?.cwd ? loadPermissionRules(ctx.cwd, message => { if (ctx.hasUI) ctx.ui.notify(message, 'warning'); else console.warn(message); }) : undefined;
-    const next = launchMode && allowed(launchMode) ? launchMode : restored && allowed(restored) ? restored : config?.defaultMode;
+    const next = restored && allowed(restored) ? restored : launchMode && allowed(launchMode) ? launchMode : config?.defaultMode;
     change(next && allowed(next) ? next : 'default', false);
   });
-  pi.registerShortcut('alt+m', { description: 'Cycle permission mode', handler: () => { change(cycle[(cycle.indexOf(mode) + 1) % cycle.length]!); } });
+  pi.registerShortcut('alt+m', { description: 'Cycle permission mode', handler: cycleMode });
   pi.on('agent_start', () => { turnDeclines = 0; });
   pi.on('turn_start', () => { turnDeclines = 0; });
   const decline = () => {
@@ -88,31 +134,62 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
     if (turnDeclines >= 3 || sessionDeclines >= 20) change('default');
   };
   pi.on('agent_before_settle', async (event, ctx) => {
-    if (mode !== 'plan' || !noteChanged || event.outcome !== 'completed' || !ctx.hasUI) return;
-    noteChanged = false;
+    if (mode !== 'plan' || pendingPlan === undefined || event.outcome !== 'completed' || !ctx.hasUI) return;
+    const started = epoch;
+    const content = pendingPlan;
+    pendingPlan = undefined;
     try {
-      const choice = await ctx.ui.select('Plan note updated', ['Start in Edits', 'Start in Manual', 'Keep planning', 'Discard the note']);
+      const session = ctx.sessionManager.getSessionId();
+      const file = planNotePath(ctx.cwd, session);
+      if (await readPlanNote(ctx.cwd, session) !== content || started !== epoch) return;
+      const choice = await prompter.choose(ctx, {
+        title: 'Ready to implement?',
+        preview: [{ text: file, color: 'dim' }, { text: content }],
+        options: [
+          { value: 'Start in Edits', label: 'Yes, start in Edits mode' },
+          { value: 'Start in Manual', label: 'Yes, ask before edits' },
+          { value: 'Keep planning', label: 'No, keep planning' },
+          { value: 'Discard the note' },
+        ],
+        initial: 'Keep planning',
+      });
+      if (!choice || started !== epoch || ctx.signal?.aborted) return;
+      if (await readPlanNote(ctx.cwd, session) !== content || started !== epoch || ctx.signal?.aborted) {
+        ctx.ui.notify('The plan changed during review. It was not approved.', 'warning');
+        return;
+      }
       const next = choice === 'Start in Edits' ? 'acceptEdits' : choice === 'Start in Manual' ? 'default' : undefined;
       if (next) {
         change(next, false);
         const entries = [...event.entries, { type: 'custom' as const, customType: MODE_ENTRY, data: { mode: next } }];
         const goal = readGoalState([...ctx.sessionManager.getBranch(), ...entries]);
         if (goal?.status === 'active' || event.continue || event.context?.pendingMessages?.length || ctx.hasPendingMessages?.()) return { entries };
-        return { entries: [...entries, { type: 'custom_message' as const, customType: 'bi.plan-approval', content: `The plan in ${planNotePath(ctx.cwd, ctx.sessionManager.getSessionId())} was approved. Implement it now.`, display: false }], continue: true };
+        return { entries: [...entries, { type: 'custom_message' as const, customType: 'bi.plan-approval', content: `The plan in ${file} was approved. Implement it now.`, display: false }], continue: true };
       }
-      else if (choice === 'Discard the note') await discardPlanNote(ctx.cwd, ctx.sessionManager.getSessionId());
+      else if (choice === 'Discard the note') await discardPlanNote(ctx.cwd, session);
     } catch { /* Dismissal and UI errors leave Plan active. */ }
   });
   pi.on('tool_call', async (event, ctx) => {
-    const loaded = loadPermissionRules(ctx.cwd, message => { if (ctx.hasUI) ctx.ui.notify(message, 'warning'); else console.warn(message); });
-    if (loaded.invalid) return { block: true, reason: 'Invalid permission configuration; correct it before running tools.' };
-    const decision = decidePermission(mode, event.toolName, event.input, ctx.cwd, loaded.rules);
-    if (decision.action === 'deny') return { block: true, reason: decision.reason };
+    const { toolName, input } = event;
+    const started = epoch;
+    const args = input as Record<string, unknown>;
+    const deny = (reason: string) => block(toolName, reason);
+    const load = () => loadPermissionRules(ctx.cwd, message => { if (ctx.hasUI) ctx.ui.notify(message, 'warning'); else console.warn(message); });
+    const loaded = load();
+    if (loaded.invalid) return deny('Invalid permission configuration; correct it before running tools.');
+    const decision = decidePermission(mode, toolName, input, ctx.cwd, loaded.rules);
+    if (decision.action === 'deny') return deny(decision.reason);
     if (decision.action === 'allow') return undefined;
+    const stillCurrent = () => started === epoch && !ctx.signal?.aborted;
+    const recheck = () => {
+      const current = load();
+      if (current.invalid) return false;
+      const updated = decidePermission(mode, toolName, input, ctx.cwd, current.rules);
+      return updated.action !== 'deny' && updated.source === decision.source && updated.reason === decision.reason;
+    };
     // Only summarize a call when no operands, secrets, file contents or output are sent.
-    if (mode === 'auto' && decision.source === 'default' && options.reviewer && event.toolName === 'bash' &&
-      typeof (event.input as Record<string, unknown>).command === 'string') {
-      const command = (event.input as Record<string, unknown>).command as string;
+    if (mode === 'auto' && decision.source === 'default' && options.reviewer && toolName === 'bash' && typeof args.command === 'string') {
+      const command = args.command;
       const shell = classifyShell(command, ctx.cwd);
       if (shell.kind === 'read' && shell.paths.length === 0 && command.trim() === 'pwd') {
         let timer: number | undefined;
@@ -121,27 +198,45 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
             options.reviewer({ tool: 'bash', operation: 'pwd' }),
             new Promise<undefined>(resolve => { timer = setTimeout(resolve, options.reviewerTimeoutMs ?? 15_000); }),
           ]);
-          if (reviewed === 'allow') return undefined;
-          if (reviewed === 'deny') { decline(); return { block: true, reason: 'Reviewer declined permission.' }; }
+          if (!stillCurrent()) return deny('Permission context changed while reviewing.');
+          if (reviewed === 'allow') return recheck() && args.command === command ? undefined : deny('Permission context changed while reviewing.');
+          if (reviewed === 'deny') { decline(); return deny('Reviewer declined permission.'); }
         } catch { /* Timeout and reviewer failures fall back to the user. */ }
         finally { if (timer) clearTimeout(timer); }
       }
     }
-    if (mode === 'dontAsk' || !ctx.hasUI) return { block: true, reason: 'Permission requires an interactive confirmation.' };
-    const canSave = decision.source !== 'rule' && ['write', 'edit', 'mkdir', 'copy', 'move', 'delete', 'apply_patch'].includes(event.toolName);
-    let key: string;
-    try { key = JSON.stringify(canonical([ctx.cwd, event.toolName, event.input])); }
-    catch { return { block: true, reason: 'Unable to identify tool call safely.' }; }
-    if (canSave && approvals.has(key)) return undefined;
+    if (!stillCurrent()) return deny('Permission context changed before approval.');
+    if (mode === 'dontAsk' || !ctx.hasUI) return deny('Permission requires an interactive confirmation.');
+    const canSave = decision.source === 'default' && ['write', 'edit', 'mkdir', 'copy', 'move', 'delete', 'apply_patch'].includes(toolName);
     try {
-      const options = canSave ? ['Allow once', 'Allow exact call for session', 'Deny'] : ['Allow once', 'Deny'];
-      const selected = await ctx.ui.select(`Allow ${event.toolName}?\n${JSON.stringify(event.input)}`, options);
-      if (selected === 'Allow once') return undefined;
-      if (selected === 'Allow exact call for session' && canSave) { approvals.add(key); return undefined; }
-    } catch { /* A failed dialog must not grant permission. */ }
-    decline();
-    return { block: true, reason: 'Permission declined.' };
+      const key = approvalKey(ctx.cwd, toolName, args);
+      if (canSave && approvals.has(key)) return undefined;
+      const { title, preview } = previewToolCall(toolName, args);
+      const selected = await prompter.choose(ctx, {
+        title,
+        preview: [{ text: decision.reason, color: 'dim' }, ...preview],
+        options: [
+          { value: 'Allow once', label: 'Yes, allow once' },
+          ...(canSave ? [{ value: 'Allow exact call for session', label: 'Yes, exact call for this session' }] : []),
+          { value: 'Deny', label: 'No' },
+        ],
+        initial: 'Deny',
+      });
+      if (selected === 'Allow once' || (selected === 'Allow exact call for session' && canSave)) {
+        if (!stillCurrent() || !recheck() || approvalKey(ctx.cwd, toolName, args) !== key) return deny('Permission context changed while waiting for approval.');
+        if (selected === 'Allow exact call for session') approvals.add(key);
+        return undefined;
+      }
+    } catch { return deny('Unable to identify tool call safely.'); }
+    if (stillCurrent()) decline();
+    return deny('Permission declined.');
   });
-  return { get mode() { return mode; }, get label() { return labels[mode]; }, subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn); }; } };
+  return {
+    get mode() { return mode; },
+    get label() { return labels[mode]; },
+    cycle: cycleMode,
+    prompter,
+    subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn); }; },
+  };
 }
 export type PermissionController = ReturnType<typeof createPermissionModes>;

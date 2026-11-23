@@ -117,15 +117,18 @@ export function createExecutionTools(
     }),
     execTool('terminal', 'Start an interactive shell process or send input to one', { command: 'string?', processId: 'string?', input: 'string?' }, async (a, c) => {
       if (typeof a.input === 'string') {
+        if (a.command !== undefined) return { success: false, error: 'Terminal command and input are mutually exclusive' };
         const p = processManager.get(str(a, 'processId'));
         if (!p?.child.stdin?.writable) return { success: false, error: 'Terminal process not found or stdin is closed' };
+        if (!c.confirmCommand || !await c.confirmCommand(`Send terminal input to ${a.processId}:\n${a.input}`)) return { success: false, error: 'Terminal input was not approved' };
+        if (c.signal?.aborted || !p.child.stdin.writable) return { success: false, error: 'Terminal input cancelled or stdin closed' };
         p.child.stdin.write(a.input);
         return { success: true, output: p.output, metadata: {
           running: !p.exited,
           outputTruncated: p.outputTruncated === true,
         } };
       }
-      if (typeof a.command !== 'string') return { success: false, error: 'command is required to start a terminal' };
+      if (a.processId !== undefined || typeof a.command !== 'string') return { success: false, error: 'command is required to start a terminal' };
       const command = str(a, 'command');
       if (!await authorize(command, c)) return { success: false, error: 'Command denied by execution policy' };
       const { id } = processManager.start(command, c);

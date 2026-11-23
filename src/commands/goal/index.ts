@@ -89,6 +89,7 @@ export function registerGoalCommand(pi: ExtensionAPI): void {
               ...goal,
               objective: argument,
               progress: 'Objective updated. Reassess the plan and acceptance criteria.',
+              verification: undefined,
               iteration: 0,
               reportCount: 0,
               status: goal.status === 'paused' ? 'paused' as const : 'active' as const,

@@ -811,6 +811,16 @@ test('apply_patch undo restores agent changes and refuses to overwrite later edi
     const undo = await dispatcher.dispatch({ name: 'undo', arguments: {} }, ctx);
     assert.equal(undo.success, false);
     assert.equal(await readFile(path.join(dir, 'file.txt'), 'utf8'), 'user edit');
+    await writeFile(path.join(dir, 'file.txt'), 'after');
+    let asked = false;
+    const refused = await dispatcher.dispatch({ name: 'undo', arguments: {} }, {
+      ...ctx, checkUndo: () => true,
+      confirmDestructive: async () => { asked = true; await writeFile(path.join(dir, 'file.txt'), 'edited during confirmation'); return true; },
+    });
+    assert.equal(asked, true);
+    assert.equal(refused.success, false);
+    assert.equal(await readFile(path.join(dir, 'file.txt'), 'utf8'), 'edited during confirmation');
+    await writeFile(path.join(dir, 'file.txt'), 'user edit');
     const duplicate = await dispatcher.dispatch({
       name: 'apply_patch',
       arguments: { edits: [

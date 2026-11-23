@@ -9,6 +9,10 @@ const parameters = Type.Object({
     Type.Literal('blocked'),
   ]),
   summary: Type.String({ minLength: 1, maxLength: 4_000 }),
+  verification: Type.Optional(Type.Object({
+    status: Type.Union([Type.Literal('passed'), Type.Literal('failed'), Type.Literal('not_run')]),
+    summary: Type.String({ minLength: 1, maxLength: 1000 }),
+  })),
 });
 
 export function registerGoalReportTool(pi: ExtensionAPI): void {
@@ -17,7 +21,7 @@ export function registerGoalReportTool(pi: ExtensionAPI): void {
     label: 'Report goal progress',
     description: 'Record verified progress on the active /goal and tell bi whether to continue, stop as completed, or report a blocker.',
     promptSnippet: 'Record progress and completion/blocker status for the active /goal',
-    promptGuidelines: ['Call only while a persistent /goal is active.'],
+    promptGuidelines: ['Call only while a persistent /goal is active. Include verification status and the checks actually run, or report not_run.'],
     parameters,
     execute: async (_toolCallId, args, _signal, _onUpdate, ctx) => {
       const goal = readGoalState(ctx.sessionManager.getBranch());
@@ -52,7 +56,7 @@ export function registerGoalReportTool(pi: ExtensionAPI): void {
       }
 
       const status = args.status === 'continue' ? 'active' : args.status;
-      saveGoalState(pi, { ...goal, status, progress: summary, reportCount: goal.reportCount + 1, updatedAt: Date.now() });
+      saveGoalState(pi, { ...goal, status, progress: summary, verification: args.verification, reportCount: goal.reportCount + 1, updatedAt: Date.now() });
       return {
         content: [{ type: 'text', text: `Goal progress saved (${status}).` }],
         details: {},

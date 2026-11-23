@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { link, mkdtemp, readFile, rename, rm, symlink, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createPermissionModes } from '../src/extension/permission-modes/index.ts';
+import { createPermissionModes, type PermissionMode } from '../src/extension/permission-modes/index.ts';
 import { decidePermission } from '../src/extension/permission-modes/policy.ts';
 import { planNotePath, writePlanNote } from '../src/extension/permission-modes/plan-note.ts';
 import { installTui } from '../src/tui/index.ts';
@@ -159,14 +159,32 @@ test('restricted launch choices, branch restoration and reviewer failures fail c
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
+test('reload prefers the latest mode and leaves plan_note inactive outside Plan', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-reload-mode-'));
+  try {
+    const ctx = context(cwd), h = host('plan');
+    await h.emit('session_start', { reason: 'startup' }, ctx);
+    assert.equal(h.controller.mode, 'plan');
+    await h.emit('session_shutdown', { reason: 'reload' }, ctx);
+    assert.deepEqual(h.active, ['read', 'write', 'bash', 'goal_report']);
+    ctx.branch.push({ type: 'custom', customType: 'bi.permission-mode', data: { mode: 'auto' } });
+    const reloaded = host('plan');
+    await reloaded.emit('session_start', { reason: 'reload' }, ctx);
+    assert.equal(reloaded.controller.mode, 'auto');
+    assert.ok(!reloaded.active.includes('plan_note'));
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
 test('footer redraws on mode change, retains a narrow label and unsubscribes', () => {
   let footer: any, notify: any, unsubscribed = false, renders = 0;
-  const controller = { label: 'Manual', subscribe(fn: any) { notify = fn; return () => { unsubscribed = true; }; } };
+  let mode: PermissionMode = 'default';
+  const controller = { get mode() { return mode; }, label: 'Manual', cycle() {}, subscribe(fn: () => void) { notify = fn; return () => { unsubscribed = true; }; } };
   const ctx: any = { cwd: process.cwd(), sessionManager: { getBranch: () => [] }, ui: { setHeader() {}, setFooter(factory: any) { footer = factory({ requestRender() { renders++; } }, { fg: (_: any, text: string) => text }, { onBranchChange: () => () => {}, getGitBranch: () => undefined }); } } };
-  installTui(ctx, undefined, controller);
+  installTui(ctx, controller);
   assert.match(footer.render(12)[0], /Manual/);
-  controller.label = 'Plan'; notify(); assert.equal(renders, 1);
-  assert.match(footer.render(80)[0], /Mode: Plan/);
+  assert.match(footer.render(80)[0], /^(?:⏸|\|\|) manual mode on\b/);
+  controller.label = 'Plan'; mode = 'plan'; notify(); assert.equal(renders, 1);
+  assert.match(footer.render(80)[0], /plan mode on/);
   footer.dispose(); assert.equal(unsubscribed, true);
 });
 
@@ -301,6 +319,50 @@ test('path rules cover normalized paths, symlink targets, and all patch paths', 
     assert.equal(decidePermission('acceptEdits', 'copy', { source: 'alias/data', destination: 'other' }, cwd, rules).action, 'deny');
     assert.equal(decidePermission('acceptEdits', 'move', { source: 'other', destination: './private/data' }, cwd, { deny: ['move:private/*'] }).action, 'deny');
     assert.equal(decidePermission('acceptEdits', 'apply_patch', { edits: [{ path: 'other', oldText: 'a', newText: 'b' }, { path: 'alias/data', oldText: 'a', newText: 'b' }] }, cwd, rules).action, 'deny');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('approval fails closed if a rule, path, or mode changes while the prompt is open', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-stale-approval-'));
+  try {
+    await mkdir(path.join(cwd, '.pi'));
+    await symlink('first', path.join(cwd, 'file'));
+    await writeFile(path.join(cwd, 'first'), 'one');
+    await writeFile(path.join(cwd, 'second'), 'two');
+    const ctx = context(cwd), h = host();
+    await h.emit('session_start', {}, ctx);
+    const call = { toolName: 'write', input: { path: 'file', content: 'edit' } };
+    const ruleFile = path.join(cwd, '.pi', 'permission-modes.json');
+    ctx.ui.select = async () => {
+      await writeFile(ruleFile, JSON.stringify({ deny: ['write:file'] }));
+      return 'Allow once';
+    };
+    assert.match((await h.emit('tool_call', call, ctx)).reason, /context changed/);
+    await rm(ruleFile);
+    ctx.ui.select = async () => {
+      await rm(path.join(cwd, 'file'));
+      await symlink('second', path.join(cwd, 'file'));
+      return 'Allow exact call for session';
+    };
+    assert.match((await h.emit('tool_call', call, ctx)).reason, /context changed/);
+    ctx.ui.select = async () => { h.controller.cycle(); return 'Allow once'; };
+    assert.match((await h.emit('tool_call', call, ctx)).reason, /context changed/);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('approving a plan refuses changed content', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-stale-plan-'));
+  try {
+    const ctx = context(cwd), h = host('plan');
+    await h.emit('session_start', {}, ctx);
+    await h.tool.execute('1', { content: 'Original proposal' }, undefined, undefined, ctx);
+    ctx.ui.select = async (title?: string) => {
+      assert.match(title!, /Original proposal/);
+      await writeFile(planNotePath(cwd, 'session-1'), 'Changed after preview');
+      return 'Start in Edits';
+    };
+    assert.equal(await h.emit('agent_before_settle', { outcome: 'completed', entries: [] }, ctx), undefined);
+    assert.equal(h.controller.mode, 'plan');
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 

@@ -43,7 +43,7 @@ function readRulesFile(root: string, relativePath: string): unknown {
 }
 
 export function loadPermissionRules(cwd: string, report: (message: string) => void = console.warn) {
-  if (typeof cwd !== 'string' || !cwd) return { rules: {} as PermissionRules, defaultMode: undefined as string | undefined, invalid: true };
+  if (typeof cwd !== 'string' || !cwd) return { rules: {} as PermissionRules, groups: [], defaultMode: undefined as string | undefined, invalid: true };
   let invalid = false;
   const load = (root: string, relativePath: string, trusted: boolean) => {
     try {
@@ -58,5 +58,10 @@ export function loadPermissionRules(cwd: string, report: (message: string) => vo
   };
   const user = load(os.homedir(), '.pi/agent/permission-modes.json', true);
   const project = load(cwd, '.pi/permission-modes.json', false);
-  return { rules: { allow: user.allow, ask: [...(user.ask ?? []), ...(project.ask ?? [])], deny: [...(user.deny ?? []), ...(project.deny ?? [])] }, defaultMode: user.defaultMode, invalid };
+  return {
+    rules: { allow: user.allow, ask: [...(user.ask ?? []), ...(project.ask ?? [])], deny: [...(user.deny ?? []), ...(project.deny ?? [])] },
+    groups: [{ label: 'User', rules: user }, { label: 'Project', rules: project }],
+    defaultMode: user.defaultMode,
+    invalid,
+  };
 }

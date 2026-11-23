@@ -2,6 +2,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BI_CONFIG } from './index.ts';
 import { CONFIG_LIMITS } from './limits.ts';
+import { resolvePermissionPath } from '../extension/permission-modes/paths.ts';
 
 /** Safe per-project preferences; command and destructive-operation policies are not configurable here. */
 export interface ProjectConfig {
@@ -28,7 +29,7 @@ const MAX_CONFIG_BYTES = 64 * 1024;
 
 /** Create starter project preferences once, leaving an existing config untouched. */
 export async function ensureProjectConfig(cwd: string): Promise<void> {
-  const directory = join(cwd, '.pi');
+  const directory = join(resolvePermissionPath(cwd, '.'), '.pi');
   const file = join(directory, 'config.json');
   const defaults: ProjectConfig = {
     filesystem: BI_CONFIG.filesystem,
@@ -38,6 +39,7 @@ export async function ensureProjectConfig(cwd: string): Promise<void> {
     systemPrompt: { additional: '' },
   };
   try {
+    if (resolvePermissionPath(cwd, directory) !== directory) return;
     await mkdir(directory, { recursive: true });
     await writeFile(file, `${JSON.stringify(defaults, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
   } catch (error) {
@@ -47,14 +49,14 @@ export async function ensureProjectConfig(cwd: string): Promise<void> {
 }
 
 /** Load only allowlisted, bounded preferences from the active project's .pi/config.json. */
-export async function loadProjectConfig(cwd: string): Promise<ProjectConfig> {
+export async function loadProjectConfig(cwd: string, diagnose?: (issue: string) => void): Promise<ProjectConfig> {
   const file = join(cwd, '.pi', 'config.json');
   try {
     const fileStat = await stat(file);
-    if (!fileStat.isFile() || fileStat.size > MAX_CONFIG_BYTES) return {};
+    if (!fileStat.isFile() || fileStat.size > MAX_CONFIG_BYTES) { diagnose?.('Project config must be a regular file under 64 KiB.'); return {}; }
     const parsed: unknown = JSON.parse(await readFile(file, 'utf8'));
     const root = record(parsed);
-    if (!root) return {};
+    if (!root) { diagnose?.('Project config must contain a JSON object.'); return {}; }
 
     const filesystem = record(root.filesystem);
     const git = record(root.git);
@@ -92,8 +94,17 @@ export async function loadProjectConfig(cwd: string): Promise<ProjectConfig> {
       systemPrompt.additional.length <= CONFIG_LIMITS.maxProjectPromptChars) {
       result.systemPrompt = { additional: systemPrompt.additional };
     }
+    if (diagnose) for (const section of ['filesystem', 'git', 'output', 'startup', 'systemPrompt'] as const) {
+      if (!Object.hasOwn(root, section)) continue;
+      const raw = record(root[section]);
+      if (!raw) { diagnose(`Ignored ${section}: expected an object.`); continue; }
+      const effective = result[section] ?? {};
+      const supported = section === 'systemPrompt' ? { additional: '' } : BI_CONFIG[section];
+      for (const key of Object.keys(supported)) if (Object.hasOwn(raw, key) && !Object.hasOwn(effective, key)) diagnose(`Ignored ${section}.${key}: wrong type or outside supported limits.`);
+    }
     return result;
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') diagnose?.(error instanceof SyntaxError ? 'Project config contains invalid JSON.' : 'Project config could not be read.');
     // A missing or invalid project config must not prevent normal tool execution.
     return {};
   }

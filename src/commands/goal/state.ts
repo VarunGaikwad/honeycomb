@@ -11,6 +11,7 @@ export interface GoalState {
   objective: string;
   status: GoalStatus;
   progress: string;
+  verification?: { status: 'passed' | 'failed' | 'not_run'; summary: string };
   iteration: number;
   reportCount: number;
   maxIterations: number;
