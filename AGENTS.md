@@ -29,4 +29,4 @@ Run these local commands from the repository root with Node.js >=22.19.0. Pi sup
 ## Gotchas
 - Session startup creates `.pi/config.json` only if missing. Project overrides are allowlisted; tool preferences are reread per call. Quiet startup may update `.pi/settings.json` but preserves explicit settings.
 - `/init` sends an editing prompt rather than writing a template. It requires an idle agent and confirms regeneration of existing root guidance when a UI is available.
-- The bundled `bi` theme keeps its original name for compatibility.
+- The Honeycomb themes are `honeycomb-light` and `honeycomb-dark`.

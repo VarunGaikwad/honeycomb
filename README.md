@@ -59,7 +59,7 @@ bee --help
 ```
 
 `bee` starts Pi with Honeycomb loaded and forwards Pi session arguments. The existing
-`--bi-*` flags and `bi` theme keep their names for compatibility. You can also use Pi directly:
+`--bi-*` flags keep their names for compatibility. You can also use Pi directly:
 
 ```bash
 # Try for one session (no install needed)
@@ -96,9 +96,10 @@ Inside pi:
 - `/review` — reviews the current changes
 - `/simplify` — looks for opportunities to simplify code
 - Interactive mode uses a responsive welcome panel, prompt chevron, status footer, and collapsible tool output. The detailed footer shows session usage across all recorded entries (including other branches), estimated cost, and elapsed wall time including time away. Set `ui.footerStyle` to `"compact"` in `.pi/config.json` to use the original compact footer; the default is `"detailed"`. Use **Ctrl+O** (Pi's default) to expand tool output and `/session` to see usage statistics.
-- Select a bundled theme in `/settings` → **Theme**: `bi`, `catppuccin-mocha`,
-  `github-dark`, `tokyo-day`, `tokyo-night`, `vercel-black`, or `vercel-light`.
-  To try `bi` with its honey-gold accents and charcoal panels without installing: `pi -e ./ --theme ./themes/honeycomb.json --use-theme bi`.
+- Select a bundled theme in `/settings` → **Theme**: `honeycomb-light`, `honeycomb-dark`,
+  `catppuccin-mocha`, `github-dark`, `tokyo-day`, `tokyo-night`, `vercel-black`, or `vercel-light`.
+  To try the Honeycomb pair and match your terminal's appearance: `pi -e ./ --theme ./themes/honeycomb-light.json --theme ./themes/honeycomb-dark.json --use-theme honeycomb-light/honeycomb-dark`.
+  If you previously selected `honeycomb`, switch to `honeycomb-dark` to keep the original palette.
 
 Goal state is stored in the current Pi session transcript, so it survives session
 resume and follows session branches. Active goals continue through Pi's
