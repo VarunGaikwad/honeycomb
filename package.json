@@ -28,7 +28,7 @@
     "bin/",
     "src/",
     "themes/",
-    "plan/tool-parity.md",
+    "plan/tools/tool-parity.md",
     "README.md"
   ],
   "pi": {

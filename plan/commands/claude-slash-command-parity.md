@@ -42,7 +42,7 @@ Source of truth: `temp/src/commands.ts` plus `temp/src/skills/bundled/index.ts`.
 
 ### Existing Bi commands: name match doesn't mean behavior match
 
-Bi registers **10** commands: the eight in the main-registry overlap plus `/simplify` and Bi-only `/goal`. See `src/index.ts`, `src/tui/permission-rules.ts`, and `src/extension/register-tools.ts`; the old `plan/bi-extension-roadmap.md` is not the runtime inventory.
+Bi registers **10** commands: the eight in the main-registry overlap plus `/simplify` and Bi-only `/goal`. See `src/index.ts`, `src/tui/permission-rules.ts`, and `src/extension/register-tools.ts`; the [extension roadmap](../bi-extension-roadmap.md) is not the runtime inventory.
 
 | Command | Difference worth documenting |
 | --- | --- |

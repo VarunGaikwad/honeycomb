@@ -136,7 +136,7 @@ For user-owned Claude commands and skills, migrate manually: review `.claude/com
 
 `/tool-search [name]` shows tool names and active/inactive status for the current
 session in TUI or RPC. Active means exposed to the model, not authorized to run.
-This is not a usage log. See the [tool parity matrix](plan/tool-parity.md).
+This is not a usage log. See the [tool parity matrix](plan/tools/tool-parity.md).
 
 `glob` lists files matching a relative pattern such as `src/**/*.ts`, with an
 optional workspace subdirectory as its search root. Patterns support `*`, `?`,
