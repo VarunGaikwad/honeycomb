@@ -6,7 +6,7 @@ import { setImmediate } from 'node:timers/promises';
 import { test } from 'node:test';
 import { matchesKey, visibleWidth, type Component, type KeyId } from '@earendil-works/pi-tui';
 import { BiPromptEditor, installPromptEditor } from '../src/tui/editor.ts';
-import { renderHeader } from '../src/tui/header.ts';
+import { createWelcomeHeader, renderHeader } from '../src/tui/header.ts';
 import { ASCII } from '../src/tui/text.ts';
 import { createPermissionPrompter } from '../src/tui/permission-dialog.ts';
 import { registerPermissionRules } from '../src/tui/permission-rules.ts';
@@ -61,6 +61,56 @@ test('welcome panel adapts to narrow columns and escapes terminal controls in pa
   assert.match(renderHeader(100, theme as any, cwd).join('\n'), ASCII ? /\|====\|/ : /\x1b\[38;5;58;48;5;220m▀/);
   assert.match(renderHeader(24, theme as any, cwd)[0]!, /<\(o\.o\)>/);
   assert.doesNotMatch(renderHeader(7, theme as any, cwd)[0]!, /<\(o\.o\)>/);
+});
+
+test('startup bee flaps and hovers, then rests without changing the panel size', t => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'] });
+  let renders = 0;
+  const ctx = { cwd: '/project', model: undefined };
+  const header = createWelcomeHeader({ requestRender: () => { renders++; } }, theme, ctx, 'shift+tab', true);
+  const compact = header.render(69);
+  t.mock.timers.tick(150);
+  assert.deepEqual(header.render(69), compact);
+  assert.equal(renders, 0);
+
+  const resting = renderHeader(70, theme, ctx.cwd);
+  const flap = header.render(70);
+  t.mock.timers.tick(150);
+  const hover = header.render(70);
+  if (ASCII) {
+    assert.deepEqual(flap, resting);
+    assert.deepEqual(hover, resting);
+    assert.equal(renders, 0);
+  } else {
+    assert.notDeepEqual(flap, resting);
+    assert.notDeepEqual(hover, flap);
+    assert.deepEqual(flap.map(visibleWidth), resting.map(visibleWidth));
+    assert.deepEqual(hover.map(visibleWidth), resting.map(visibleWidth));
+    assert.equal(renders, 1);
+  }
+  t.mock.timers.tick(2550);
+  assert.deepEqual(header.render(70), flap);
+  const beforeLanding = renders;
+  t.mock.timers.tick(150);
+  assert.deepEqual(header.render(70), resting);
+  assert.equal(renders, beforeLanding + (ASCII ? 0 : 1));
+  const finished = renders;
+  t.mock.timers.tick(3000);
+  assert.equal(renders, finished);
+});
+
+test('header disposal cancels animation and non-startup headers stay static', t => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'] });
+  const tui = { requestRender: () => assert.fail('unexpected redraw') };
+  const ctx = { cwd: '/project', model: undefined };
+  const disposed = createWelcomeHeader(tui, theme, ctx, 'shift+tab', true);
+  const staticHeader = createWelcomeHeader(tui, theme, ctx, 'shift+tab', false);
+  const resting = disposed.render(80);
+  assert.deepEqual(staticHeader.render(80), resting);
+  disposed.dispose();
+  t.mock.timers.tick(450);
+  assert.deepEqual(disposed.render(80), resting);
+  assert.deepEqual(staticHeader.render(80), resting);
 });
 
 test('custom editor scopes Shift+Tab to cycling and preserves text and thinking', () => {

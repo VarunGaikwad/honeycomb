@@ -4,7 +4,7 @@ import { basename } from 'node:path';
 import { readGitStatus } from '../tools/git.ts';
 import type { PermissionController, PermissionMode } from '../extension/permission-modes/index.ts';
 import { installPromptEditor } from './editor.ts';
-import { displayModel, renderHeader } from './header.ts';
+import { createWelcomeHeader, displayModel } from './header.ts';
 import { compactNumber, durationText, footerStats } from './footer-stats.ts';
 import { ASCII, fit, glyphs, literal } from './text.ts';
 
@@ -19,12 +19,9 @@ const badges = {
 
 type ModeSource = Pick<PermissionController, 'mode' | 'label' | 'cycle' | 'subscribe'>;
 
-export function installTui(ctx: ExtensionContext, permissions?: ModeSource, footerStyle: 'compact' | 'detailed' = 'detailed'): void {
+export function installTui(ctx: ExtensionContext, permissions?: ModeSource, footerStyle: 'compact' | 'detailed' = 'detailed', animateHeader = false): void {
   const cycleKey = installPromptEditor(ctx, permissions?.cycle);
-  ctx.ui.setHeader((_tui, theme) => ({
-    render: width => renderHeader(width, theme, ctx.cwd, ctx.model, cycleKey),
-    invalidate() {},
-  }));
+  ctx.ui.setHeader((tui, theme) => createWelcomeHeader(tui, theme, ctx, cycleKey, animateHeader));
   ctx.ui.setWorkingIndicator?.({
     frames: (ASCII ? ['*', '+', '.'] : ['✳', '✶', '✻', '✽']).map(frame => ctx.ui.theme.fg('accent', frame)),
     intervalMs: 120,
