@@ -98,7 +98,7 @@ Inside pi:
 - Interactive mode uses a responsive welcome panel, prompt chevron, status footer, and collapsible tool output. The detailed footer shows session usage across all recorded entries (including other branches), estimated cost, and elapsed wall time including time away. Set `ui.footerStyle` to `"compact"` in `.pi/config.json` to use the original compact footer; the default is `"detailed"`. Use **Ctrl+O** (Pi's default) to expand tool output and `/session` to see usage statistics.
 - Select a bundled theme in `/settings` → **Theme**: `bi`, `catppuccin-mocha`,
   `github-dark`, `tokyo-day`, `tokyo-night`, `vercel-black`, or `vercel-light`.
-  To try the warm `bi` theme without installing: `pi -e ./ --theme ./themes/bi.json --use-theme bi`.
+  To try `bi` with its honey-gold accents and charcoal panels without installing: `pi -e ./ --theme ./themes/honeycomb.json --use-theme bi`.
 
 Goal state is stored in the current Pi session transcript, so it survives session
 resume and follows session branches. Active goals continue through Pi's
@@ -363,7 +363,7 @@ for every run.
 npm install        # install dev deps (types, tooling)
 npm run typecheck  # type-check the extension
 npm test           # run all tests (Node.js with TypeScript transform support)
-node --experimental-transform-types --test tests/tools.test.ts # run one test file
+node --experimental-transform-types --test tests/tools/tools.test.ts # run one test file
 ```
 
 Host-provided packages (`@earendil-works/pi-coding-agent`, `typebox`, etc.)

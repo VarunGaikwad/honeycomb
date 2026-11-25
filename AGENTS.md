@@ -11,8 +11,8 @@ Run these local commands from the repository root with Node.js >=22.19.0. Pi sup
 | Install dev dependencies | `npm install` | Documented; not run |
 | Try one session / install into Pi | `pi -e ./` / `pi install ./` | Requires Pi; not run |
 | Typecheck `src/` (not tests) | `npm run typecheck` | Passed (`tsc --noEmit`) |
-| Run all `tests/*.test.ts` | `npm test` | Configured; not run (includes filesystem and Git fixtures) |
-| Run one suite | `node --experimental-transform-types --test tests/goal.test.ts` | Passed; substitute another test file to change suites |
+| Run all `tests/**/*.test.ts` | `npm test` | Includes filesystem and Git fixtures |
+| Run one suite | `node --experimental-transform-types --test tests/commands/goal.test.ts` | Passed; substitute another test file to change suites |
 
 - No build, dev-server, lint, or format script is defined. `.prettierrc` records formatting preferences. No CI workflow defines additional commands.
 
