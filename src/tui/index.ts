@@ -5,6 +5,7 @@ import { readGitStatus } from '../tools/git.ts';
 import type { PermissionController, PermissionMode } from '../extension/permission-modes/index.ts';
 import { installPromptEditor } from './editor.ts';
 import { displayModel, renderHeader } from './header.ts';
+import { compactNumber, durationText, footerStats } from './footer-stats.ts';
 import { ASCII, fit, glyphs, literal } from './text.ts';
 
 const badges = {
@@ -18,7 +19,7 @@ const badges = {
 
 type ModeSource = Pick<PermissionController, 'mode' | 'label' | 'cycle' | 'subscribe'>;
 
-export function installTui(ctx: ExtensionContext, permissions?: ModeSource): void {
+export function installTui(ctx: ExtensionContext, permissions?: ModeSource, footerStyle: 'compact' | 'detailed' = 'detailed'): void {
   const cycleKey = installPromptEditor(ctx, permissions?.cycle);
   ctx.ui.setHeader((_tui, theme) => ({
     render: width => renderHeader(width, theme, ctx.cwd, ctx.model, cycleKey),
@@ -34,6 +35,8 @@ export function installTui(ctx: ExtensionContext, permissions?: ModeSource): voi
     const abort = new AbortController();
     let dirty = false;
     let polling = false;
+    let cachedStats: ReturnType<typeof footerStats> | undefined;
+    let cacheKey = '';
     const pollGit = async () => {
       if (polling || abort.signal.aborted || !footerData.getGitBranch()) return;
       polling = true;
@@ -48,7 +51,7 @@ export function installTui(ctx: ExtensionContext, permissions?: ModeSource): voi
       finally { polling = false; }
     };
     void pollGit();
-    const tick = setInterval(() => void pollGit(), 5000);
+    const tick = setInterval(() => { void pollGit(); tui.requestRender(); }, 5000);
     tick.unref?.();
     const unsubscribe = footerData.onBranchChange(() => {
       dirty = false;
@@ -76,12 +79,45 @@ export function installTui(ctx: ExtensionContext, permissions?: ModeSource): voi
         const branch = footerData.getGitBranch();
         const context = ctx.getContextUsage?.();
         const cwd = literal(basename(ctx.cwd) || ctx.cwd);
-        const parts = [displayModel(ctx.model), cwd + (branch ? ` (${literal(branch)}${dirty ? '*' : ''})` : ''),
-          ...(context?.percent != null ? [`${Math.round(context.percent)}% context`] : [])];
-        const getStatus = () => parts.join(` ${glyphs.sep} `);
-        while (parts.length && visibleWidth(getStatus()) + visibleWidth(left) + (left ? 3 : 0) > width) parts.pop();
-        const status = getStatus();
-        return [status ? left + ' '.repeat(Math.max(0, width - visibleWidth(left) - visibleWidth(status))) + theme.fg('dim', status) : fit(left, width)];
+        if (footerStyle === 'compact') {
+          const parts = [displayModel(ctx.model), cwd + (branch ? ` (${literal(branch)}${dirty ? '*' : ''})` : ''),
+            ...(context?.percent != null ? [`${Math.round(context.percent)}% context`] : [])];
+          const status = () => parts.join(` ${glyphs.sep} `);
+          while (parts.length && visibleWidth(status()) + visibleWidth(left) + (left ? 3 : 0) > width) parts.pop();
+          const text = status();
+          return [text ? left + ' '.repeat(Math.max(0, width - visibleWidth(left) - visibleWidth(text))) + theme.fg('dim', text) : fit(left, width)];
+        }
+        const entries = ctx.sessionManager.getEntries();
+        const key = `${ctx.sessionManager.getSessionId()}:${ctx.sessionManager.getLeafId()}:${entries.length}`;
+        if (!cachedStats || cacheKey !== key) { cachedStats = footerStats(entries); cacheKey = key; }
+        const stats = cachedStats;
+        const percent = context?.percent == null ? null : Math.max(0, Math.min(100, Math.floor(context.percent)));
+        const bar = percent === null ? '? context' : `${(ASCII ? '#' : '▰').repeat(Math.round(percent / 10))}${(ASCII ? '-' : '▱').repeat(10 - Math.round(percent / 10))} ${percent}%`;
+        const model = displayModel(ctx.model) + (ctx.thinkingLevel && ctx.thinkingLevel !== 'off' ? ` · ${literal(ctx.thinkingLevel)}` : '');
+        const last = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === 'message' && entry.message.role === 'assistant');
+        const lastMessage = last?.type === 'message' && last.message.role === 'assistant' ? last.message : undefined;
+        const lastModel = lastMessage && ctx.model && (lastMessage.model !== ctx.model.id || lastMessage.provider !== ctx.model.provider)
+          ? ` (last: ${literal(lastMessage.provider)}/${literal(lastMessage.model)})` : '';
+        const contextColor = percent === null ? 'dim' : percent >= 80 ? 'error' : percent >= 50 ? 'warning' : 'success';
+        const first = [theme.fg('accent', model + lastModel), theme.fg(contextColor, bar + (context?.contextWindow ? ` of ${compactNumber(context.contextWindow)}` : '')), `${ASCII ? 'prompts' : '💬'} ${stats.prompts}`, cwd + (branch ? ` (${literal(branch)}${dirty ? '*' : ''})` : '')];
+        const hit = stats.input ? ` (${Math.round(stats.read / stats.input * 100)}% hit)` : '';
+        const start = Date.parse(ctx.sessionManager.getHeader()?.timestamp ?? '');
+        const second = [`↓ ${compactNumber(stats.input)} in ↑ ${compactNumber(stats.output)} out`, `cache R ${compactNumber(stats.read)} W ${compactNumber(stats.write)}${hit}`,
+          ...(stats.timed ? [`${durationText(stats.duration)} API${stats.timed < stats.assistants ? ' partial' : ''}`] : []),
+          ...(Number.isFinite(start) ? [`${durationText(Date.now() - start)} elapsed`] : []),
+          ...(stats.models.length > 1 ? [stats.models.map(model => literal(model)).join(' + ')] : [])];
+        const cost = `est. $${stats.cost.toFixed(3)}`;
+        const line = (parts: string[], right?: string) => {
+          const shown = [...parts];
+          const joined = () => shown.join(` ${glyphs.sep} `);
+          if (right && visibleWidth(joined()) + visibleWidth(right) + 3 <= width) {
+            return joined() + ' '.repeat(width - visibleWidth(joined()) - visibleWidth(right)) + right;
+          }
+          if (right) shown.push(right);
+          while (shown.length > 1 && visibleWidth(joined()) > width) shown.pop();
+          return fit(joined(), width);
+        };
+        return [line(first.slice(0, -1), first.at(-1)), theme.fg('dim', line(second, cost)), ...(left ? [fit(left, width)] : [])];
       },
     };
   });

@@ -20,6 +20,9 @@ export interface ProjectConfig {
   startup?: {
     autoEnableQuietStartup?: boolean;
   };
+  ui?: {
+    footerStyle?: 'compact' | 'detailed';
+  };
   systemPrompt?: {
     additional?: string;
   };
@@ -62,6 +65,7 @@ export async function loadProjectConfig(cwd: string, diagnose?: (issue: string) 
     const git = record(root.git);
     const output = record(root.output);
     const startup = record(root.startup);
+    const ui = record(root.ui);
     const systemPrompt = record(root.systemPrompt);
     const result: ProjectConfig = {};
 
@@ -86,6 +90,8 @@ export async function loadProjectConfig(cwd: string, diagnose?: (issue: string) 
     const maxChars = boundedInteger(output?.maxChars, CONFIG_LIMITS.minOutputChars, CONFIG_LIMITS.maxOutputChars);
     if (maxChars !== undefined) result.output = { maxChars };
 
+    if (ui?.footerStyle === 'compact' || ui?.footerStyle === 'detailed') result.ui = { footerStyle: ui.footerStyle };
+
     if (typeof startup?.autoEnableQuietStartup === 'boolean') {
       result.startup = { autoEnableQuietStartup: startup.autoEnableQuietStartup };
     }
@@ -94,7 +100,7 @@ export async function loadProjectConfig(cwd: string, diagnose?: (issue: string) 
       systemPrompt.additional.length <= CONFIG_LIMITS.maxProjectPromptChars) {
       result.systemPrompt = { additional: systemPrompt.additional };
     }
-    if (diagnose) for (const section of ['filesystem', 'git', 'output', 'startup', 'systemPrompt'] as const) {
+    if (diagnose) for (const section of ['filesystem', 'git', 'output', 'startup', 'ui', 'systemPrompt'] as const) {
       if (!Object.hasOwn(root, section)) continue;
       const raw = record(root[section]);
       if (!raw) { diagnose(`Ignored ${section}: expected an object.`); continue; }

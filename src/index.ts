@@ -44,7 +44,10 @@ export default function (pi: ExtensionAPI) {
   registerWorkingFeedback(pi);
 
   pi.on('session_start', async (_event, ctx) => {
-    if (ctx.mode === 'tui') installTui(ctx, permissionModes);
+    if (ctx.mode === 'tui') {
+      const config = await loadProjectConfig(ctx.cwd);
+      installTui(ctx, permissionModes, config.ui?.footerStyle ?? BI_CONFIG.ui.footerStyle);
+    }
     if (permissionModes.mode !== 'plan') {
       await ensureProjectConfig(ctx.cwd);
       const projectConfig = await loadProjectConfig(ctx.cwd);

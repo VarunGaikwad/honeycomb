@@ -27,6 +27,7 @@ export interface BiConfig {
     autoEnableQuietStartup: boolean;
   };
   ui: {
+    footerStyle: 'compact' | 'detailed';
     startupMessage: string;
     workingTips: { enabled: boolean; delayMs: number };
     tagline: string;
@@ -43,4 +44,4 @@ export interface BiConfig {
 }
 
 /** Defaults are kept in bi.config.json so common capability changes stay declarative. */
-export const BI_CONFIG: BiConfig = config;
+export const BI_CONFIG: BiConfig = { ...config, ui: { ...config.ui, footerStyle: config.ui.footerStyle === 'compact' ? 'compact' : 'detailed' } };

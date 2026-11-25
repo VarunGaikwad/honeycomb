@@ -24,6 +24,7 @@
     "autoEnableQuietStartup": true
   },
   "ui": {
+    "footerStyle": "detailed",
     "startupMessage": "bi extension loaded",
     "workingTips": { "enabled": true, "delayMs": 20000 },
     "tagline": "Let's build something great",

@@ -84,7 +84,7 @@ Inside pi:
 - `/rewind` — preview and restore the latest tracked Bi file operation
 - `/review` — reviews the current changes
 - `/simplify` — looks for opportunities to simplify code
-- Interactive mode uses a responsive welcome panel, prompt chevron, compact permission footer, and collapsible tool output. Use **Ctrl+O** (Pi's default) to expand tool output and `/session` to see usage statistics.
+- Interactive mode uses a responsive welcome panel, prompt chevron, status footer, and collapsible tool output. The detailed footer shows session usage across all recorded entries (including other branches), estimated cost, and elapsed wall time including time away. Set `ui.footerStyle` to `"compact"` in `.pi/config.json` to use the original compact footer; the default is `"detailed"`. Use **Ctrl+O** (Pi's default) to expand tool output and `/session` to see usage statistics.
 - Select a bundled theme in `/settings` → **Theme**: `bi`, `catppuccin-mocha`,
   `github-dark`, `tokyo-day`, `tokyo-night`, `vercel-black`, or `vercel-light`.
   To try the warm `bi` theme without installing: `pi -e ./ --theme ./themes/bi.json --use-theme bi`.
