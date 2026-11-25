@@ -55,10 +55,11 @@ test('welcome panel adapts to narrow columns and escapes terminal controls in pa
   for (const width of [1, 7, 24, 44, 69, 70, 80, 160]) {
     const lines = renderHeader(width, theme as any, cwd);
     assert.ok(lines.every(line => visibleWidth(line) <= width && !line.includes('\x1b[2J') && !line.includes('\n')));
-    assert.equal(lines.some(line => line.includes('Welcome to Bi!')), width >= 70);
+    assert.equal(lines.some(line => line.includes('Welcome to Honeycomb!')), width >= 70);
   }
   assert.match(renderHeader(100, theme as any, cwd).join('\n'), /\\u001b\[2J\\nunsafe/);
   assert.match(renderHeader(100, theme as any, cwd).join('\n'), ASCII ? /\|====\|/ : /\x1b\[38;5;58;48;5;220m▀/);
+  assert.match(renderHeader(24, theme as any, cwd)[0]!, /Honeycomb v/);
   assert.match(renderHeader(24, theme as any, cwd)[0]!, /<\(o\.o\)>/);
   assert.doesNotMatch(renderHeader(7, theme as any, cwd)[0]!, /<\(o\.o\)>/);
 });

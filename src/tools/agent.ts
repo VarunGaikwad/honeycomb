@@ -236,7 +236,7 @@ export function createAgentTools(options: { askUser?: AskUserFn; journal?: UndoJ
     {
       name: 'undo',
       description:
-        'Revert the most recent tracked Bi file operation (all files in it). Each call reverts one operation; call again to go further back. Refuses if any affected file changed since that patch.',
+        'Revert the most recent tracked Honeycomb file operation (all files in it). Each call reverts one operation; call again to go further back. Refuses if any affected file changed since that patch.',
       promptGuideline:
         'Use when the user asks to revert, or when your own last patch was wrong. If undo refuses, fix forward with apply_patch instead. Cannot undo shell commands or untracked changes.',
       shape: {},

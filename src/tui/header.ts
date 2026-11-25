@@ -53,7 +53,7 @@ export function displayModel(model?: ExtensionContext['model']): string {
 
 export function renderHeader(width: number, theme: Pick<Theme, 'fg'>, cwd: string, model?: ExtensionContext['model'], cycleKey = 'shift+tab', frame = 0): string[] {
   if (width < 1) return [];
-  const title = theme.fg('accent', 'Bi') + theme.fg('dim', ` v${packageJson.version}`);
+  const title = theme.fg('accent', 'Honeycomb') + theme.fg('dim', ` v${packageJson.version}`);
   const modelName = theme.fg('muted', displayModel(model));
   const dir = theme.fg('dim', displayCwd(cwd));
   if (width < PANEL_MIN_WIDTH) {
@@ -65,7 +65,7 @@ export function renderHeader(width: number, theme: Pick<Theme, 'fg'>, cwd: strin
   const leftWidth = Math.min(42, Math.floor((width - 3) * 0.48));
   const rightWidth = width - leftWidth - 3;
   const border = (s: string) => theme.fg('accent', s);
-  const left = [theme.fg('text', 'Welcome to Bi!'), ...(mascotFrames[frame] ?? mascotFrames[0]!), '', modelName, dir];
+  const left = [theme.fg('text', 'Welcome to Honeycomb!'), ...(mascotFrames[frame] ?? mascotFrames[0]!), '', modelName, dir];
   const { tagline, gettingStartedTitle, gettingStarted, commandsTitle, keysTitle, commands, keys } = BI_CONFIG.ui;
   const right = [theme.fg('accent', gettingStartedTitle), gettingStarted, theme.fg('dim', tagline), '',
     theme.fg('accent', commandsTitle), ...commands.map(({ command, description }) => `${theme.fg('muted', command)} ${description}`), '',

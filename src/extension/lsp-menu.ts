@@ -70,7 +70,7 @@ export function registerLspMenu(pi: ExtensionAPI, permissions: PermissionControl
         if (!ok() || !server) return;
         await enable(ctx, server);
       } catch {
-        if (!signal.aborted) ctx.ui.notify('LSP setup failed. Check npm and the Bi data folder, or choose an existing server.', 'warning');
+        if (!signal.aborted) ctx.ui.notify('LSP setup failed. Check npm and the Honeycomb data folder, or choose an existing server.', 'warning');
       } finally {
         unsubscribe();
         busy = false;

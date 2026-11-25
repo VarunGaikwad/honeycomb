@@ -71,7 +71,7 @@ export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionCont
     if (!flag || !registry.has('lsp') || !permissionModes || permissionModes.mode === 'plan' || !ctx.isProjectTrusted?.()) return;
     const lifetime = sessionLifetime.signal;
     if (!await resolveLspServer(flag, ctx.cwd)) {
-      ctx.ui.notify('Bi LSP requires an existing executable outside the workspace.', 'warning');
+      ctx.ui.notify('Honeycomb LSP requires an existing executable outside the workspace.', 'warning');
       return;
     }
     if (lifetime.aborted || (permissionModes.mode as string) === 'plan') return;
@@ -99,14 +99,14 @@ export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionCont
     return { undoEpoch: epoch, checkUndo, confirmDestructive: (operation, targets) => prompter.confirm(ctx, `Confirm ${operation}`, literal(targets, true), signal) };
   };
   const rewindCommand: Parameters<ExtensionAPI['registerCommand']>[1] = {
-    description: 'Preview and restore the last tracked Bi file operation',
+    description: 'Preview and restore the last tracked Honeycomb file operation',
     async handler(args, ctx) {
       if (!ctx.hasUI) return;
       if (ctx.mode !== 'tui' || args.trim() || !ctx.isIdle() || ctx.hasPendingMessages()) {
         ctx.ui.notify('Use /rewind without arguments in an idle terminal session.', 'warning');
         return;
       }
-      if (!registry.has('undo')) return ctx.ui.notify('The Bi agent tool group is disabled.', 'warning');
+      if (!registry.has('undo')) return ctx.ui.notify('The Honeycomb agent tool group is disabled.', 'warning');
       const guard = undoContext(ctx);
       const result = await dispatcher.dispatch({ name: 'undo', arguments: {} }, {
         ...guard, workingDirectory: ctx.cwd, sessionId: actualSessionId(ctx), signal: ctx.signal,
@@ -117,7 +117,7 @@ export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionCont
   };
   if (permissionModes) {
     pi.registerCommand?.('rewind', rewindCommand);
-    pi.registerCommand?.('checkpoint', { ...rewindCommand, description: 'Alias for /rewind (latest Bi file operation only)' });
+    pi.registerCommand?.('checkpoint', { ...rewindCommand, description: 'Alias for /rewind (latest Honeycomb file operation only)' });
   }
 
   for (const tool of registry.list()) {

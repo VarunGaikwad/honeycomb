@@ -56,7 +56,7 @@ export async function installTypeScriptLsp(cwd: string, npm: string, signal: Abo
   const dirs = await locations(cwd, home);
   if (!dirs || dirs.version !== expectedDestination || await resolveLspServer(npm, cwd) !== npm) throw new Error('LSP install location or npm changed');
   await fs.mkdir(dirs.root, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EEXIST') throw error; });
-  if (!await privateDir(dirs.root)) throw new Error('Unsafe Bi LSP data folder');
+  if (!await privateDir(dirs.root)) throw new Error('Unsafe Honeycomb LSP data folder');
   const already = await managedLspServer(cwd, home);
   if (already) return already;
   const stage = await fs.mkdtemp(path.join(dirs.root, '.install-'));

@@ -25,7 +25,7 @@
   },
   "ui": {
     "footerStyle": "detailed",
-    "startupMessage": "bi extension loaded",
+    "startupMessage": "Honeycomb extension loaded",
     "workingTips": { "enabled": true, "delayMs": 20000 },
     "tagline": "Let's build something great",
     "gettingStartedTitle": "Tips for getting started",
@@ -44,7 +44,7 @@
   },
   "systemPrompt": {
     "core": [
-      "You are bi, a coding agent running in the Pi terminal.",
+      "You are Honeycomb, a coding agent running in the Pi terminal.",
       "",
       "Your job is to inspect, modify, and test code to complete the user's requests.",
       "",

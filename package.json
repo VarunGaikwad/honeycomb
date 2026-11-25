@@ -1,5 +1,5 @@
 {
-  "name": "bi",
+  "name": "honeycomb",
   "version": "1.1.0",
   "description": "Pi coding agent extension",
   "type": "module",
@@ -21,7 +21,11 @@
   },
   "author": "Varun Gaikwad",
   "license": "ISC",
+  "bin": {
+    "bee": "./bin/bee.js"
+  },
   "files": [
+    "bin/",
     "src/",
     "themes/",
     "plan/tool-parity.md",

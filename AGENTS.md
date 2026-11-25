@@ -1,7 +1,7 @@
 # Agent guide
 
 ## Overview
-- `bi` extends the Pi coding agent with tools, slash commands, a custom system prompt, and a TUI. It uses TypeScript ES modules and TypeBox. Pi loads `src/index.ts` directly and discovers `themes/*.json` through `package.json`.
+- Honeycomb extends the Pi coding agent with tools, slash commands, a custom system prompt, and a TUI. It uses TypeScript ES modules and TypeBox. Pi loads `src/index.ts` directly and discovers `themes/*.json` through `package.json`.
 
 ## Commands
 Run these local commands from the repository root with Node.js >=22.19.0. Pi supplies the optional runtime peers; local checks use the dev dependencies.
@@ -29,4 +29,4 @@ Run these local commands from the repository root with Node.js >=22.19.0. Pi sup
 ## Gotchas
 - Session startup creates `.pi/config.json` only if missing. Project overrides are allowlisted; tool preferences are reread per call. Quiet startup may update `.pi/settings.json` but preserves explicit settings.
 - `/init` sends an editing prompt rather than writing a template. It requires an idle agent and confirms regeneration of existing root guidance when a UI is available.
-- README mentions a `bi` theme, but none of the theme files declared by the current manifest has that name.
+- The bundled `bi` theme keeps its original name for compatibility.

@@ -19,7 +19,7 @@ export function registerGoalReportTool(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'goal_report',
     label: 'Report goal progress',
-    description: 'Record verified progress on the active /goal and tell bi whether to continue, stop as completed, or report a blocker.',
+    description: 'Record verified progress on the active /goal and tell Honeycomb whether to continue, stop as completed, or report a blocker.',
     promptSnippet: 'Record progress and completion/blocker status for the active /goal',
     promptGuidelines: ['Call only while a persistent /goal is active. Include verification status and the checks actually run, or report not_run.'],
     parameters,

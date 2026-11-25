@@ -25,7 +25,7 @@ export function doctorPreferences(project: ProjectConfig, trusted: boolean): str
 
 export function registerDoctorCommand(pi: ExtensionAPI, permissions: PermissionController): void {
   pi.registerCommand('doctor', {
-    description: 'Inspect Bi configuration, permission health, tool groups, and Git',
+    description: 'Inspect Honeycomb configuration, permission health, tool groups, and Git',
     async handler(_args, ctx) {
       if (!ctx.hasUI) return;
       if (!ctx.isIdle()) return ctx.ui.notify('Wait for the current run before opening /doctor.', 'warning');
@@ -45,7 +45,7 @@ export function registerDoctorCommand(pi: ExtensionAPI, permissions: PermissionC
       catch { git = 'Warning: could not run Git. Check that Git is installed and on PATH.'; }
       const rows = [
         `Permission mode: ${permissions.label}`, ...(issues.length ? issues : ['OK: permission rules']), git,
-        `Disabled Bi tool groups: ${groups.join(', ') || 'none'}`,
+        `Disabled Honeycomb tool groups: ${groups.join(', ') || 'none'}`,
         `Registered but inactive tools: ${inactive.slice(0, 30).join(', ') || 'none'}${inactive.length > 30 ? '…' : ''}`,
         ...configIssues, ...doctorPreferences(project, ctx.isProjectTrusted()), 'Effective keyboard shortcuts: see /hotkeys.',
       ];
@@ -53,15 +53,15 @@ export function registerDoctorCommand(pi: ExtensionAPI, permissions: PermissionC
       await ctx.ui.custom<void>((tui, theme, keys, done) => {
         const thinking = keys.getKeys('app.thinking.cycle');
         if (hasBiPromptEditor(ctx)) {
-          rows.push('Bi editor active: Shift+Tab cycles permissions outside autocomplete.');
+          rows.push('Honeycomb editor active: Shift+Tab cycles permissions outside autocomplete.');
           if (thinking.includes('shift+tab')) rows.push('Shift+Tab thinking binding is intercepted; use Alt+T for thinking.');
-        } else rows.push('Bi editor not active: use Alt+M to cycle permissions.');
+        } else rows.push('Honeycomb editor not active: use Alt+M to cycle permissions.');
         let offset = 0, page = 1;
         return {
           render(width) {
             page = Math.max(1, tui.terminal.rows - 5);
             offset = Math.max(0, Math.min(offset, rows.length - page));
-            return [theme.fg('accent', 'Bi diagnostics'), ...rows.slice(offset, offset + page), '↑/↓/PgUp/PgDn: scroll · Esc: close'].map(line => fit(line, width));
+            return [theme.fg('accent', 'Honeycomb diagnostics'), ...rows.slice(offset, offset + page), '↑/↓/PgUp/PgDn: scroll · Esc: close'].map(line => fit(line, width));
           },
           handleInput(data) {
             if (keys.matches(data, 'tui.select.cancel')) return done(undefined);

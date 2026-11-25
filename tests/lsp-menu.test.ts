@@ -34,7 +34,7 @@ test('installer stages pinned packages privately and refuses symlinked store and
   await assert.rejects(installTypeScriptLsp(cwd, npm, AbortSignal.abort(), destination, home));
   assert.deepEqual(await readdir(home), []);
   await symlink(unsafe, path.join(home, '.bi-lsp'));
-  await assert.rejects(installTypeScriptLsp(cwd, npm, signal, destination, home), /Unsafe Bi LSP data folder/);
+  await assert.rejects(installTypeScriptLsp(cwd, npm, signal, destination, home), /Unsafe Honeycomb LSP data folder/);
   assert.deepEqual(await readdir(unsafe), []);
   await rm(path.join(home, '.bi-lsp'));
   const file = await installTypeScriptLsp(cwd, npm, signal, destination, home);

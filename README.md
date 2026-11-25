@@ -1,11 +1,11 @@
-# bi
+# Honeycomb
 
 A [Pi coding agent](https://pi.dev) extension package.
 
 ## Structure
 
 ```
-bi/
+honeycomb/
 ├── AGENTS.md                     # Coding-agent guidance
 ├── package.json                  # Pi extension manifest and npm scripts
 ├── package-lock.json             # Locked npm dependency versions
@@ -50,6 +50,17 @@ before they approach that limit.
 
 ## Usage
 
+With `pi` already on your `PATH`, install Honeycomb from this checkout and launch it with `bee`:
+
+```bash
+npm install -g .
+bee
+bee --help
+```
+
+`bee` starts Pi with Honeycomb loaded and forwards Pi session arguments. The existing
+`--bi-*` flags and `bi` theme keep their names for compatibility. You can also use Pi directly:
+
 ```bash
 # Try for one session (no install needed)
 pi -e ./
@@ -58,8 +69,8 @@ pi -e ./
 pi install ./
 
 # Or copy into the global extensions directory
-mkdir -p ~/.pi/agent/extensions/bi
-cp -r . ~/.pi/agent/extensions/bi
+mkdir -p ~/.pi/agent/extensions/honeycomb
+cp -r . ~/.pi/agent/extensions/honeycomb
 ```
 
 Inside pi:
@@ -70,9 +81,9 @@ Inside pi:
 - `/goal pause`, `/goal resume`, `/goal clear` — manage the current goal
 - `/goal edit <objective>`, `/goal budget <1-50>` — update the objective or iteration limit
 - `/diff [staged|unstaged]` — browse tracked Git changes without a model call
-- `/doctor` — diagnose Bi preferences, permission rules, inactive tools, and Git availability
+- `/doctor` — diagnose Honeycomb preferences, permission rules, inactive tools, and Git availability
 - `/tasks` — view the current branch's goal and todos
-- `/allowed-tools` — read-only alias for `/permissions`; `/checkpoint` — alias for `/rewind` (latest eligible Bi file operation only)
+- `/allowed-tools` — read-only alias for `/permissions`; `/checkpoint` — alias for `/rewind` (latest eligible Honeycomb file operation only)
 - `/verify [focus]` — ask the current agent to inspect and run permitted checks; in Plan mode, propose checks only
 - `/plan [request]` — enter Plan mode or start a planning turn; `/plan show` displays the session note subject to read rules
 - `/security-review staged|unstaged` — explicitly approve a bounded local diff for a separate tool-free model review
@@ -81,7 +92,7 @@ Inside pi:
 - `/lsp` — open the optional language server setup menu
 - `/worktree [list|create <directory-name>|leave]` — list Git checkouts, create a detached checkout, or find your way back to the main checkout
 - `/btw [question]` — ask a standalone question without adding it to the main transcript
-- `/rewind` — preview and restore the latest tracked Bi file operation
+- `/rewind` — preview and restore the latest tracked Honeycomb file operation
 - `/review` — reviews the current changes
 - `/simplify` — looks for opportunities to simplify code
 - Interactive mode uses a responsive welcome panel, prompt chevron, status footer, and collapsible tool output. The detailed footer shows session usage across all recorded entries (including other branches), estimated cost, and elapsed wall time including time away. Set `ui.footerStyle` to `"compact"` in `.pi/config.json` to use the original compact footer; the default is `"detailed"`. Use **Ctrl+O** (Pi's default) to expand tool output and `/session` to see usage statistics.
@@ -96,7 +107,7 @@ resume and follows session branches. Active goals continue through Pi's
 after budget exhaustion. Pressing Escape pauses the goal; use `/goal resume` to
 continue. Each turn must send exactly one `goal_report`; missing or duplicate
 reports stop the loop. When blocked, the agent should ask one focused question
-rather than guess. bi relies on the agent's report and verification evidence for
+rather than guess. Honeycomb relies on the agent's report and verification evidence for
 completion/blocker decisions; this is not an independent verifier, and it does
 not guarantee a goal will finish within the iteration budget.
 
@@ -105,7 +116,7 @@ not guarantee a goal will finish within the iteration budget.
 | Command | Behavior and limits |
 | --- | --- |
 | `/diff` | TUI only. Tab switches staged/unstaged; use arrows and Enter to load one file's patch on demand. `n`/`p` opens the next/previous patch; Esc goes back or closes the picker. Untracked files and submodule changes are omitted. The viewer honors `git_diff` rules, asks before showing sensitive paths, and does not modify the worktree or index. |
-| `/doctor` | Read-only diagnostics in TUI or RPC. Shows effective settings and why supported preferences were ignored, without printing raw config or credential values. TUI also shows whether Bi's editor is active and how that affects its shortcuts. Use `/permissions` for rule details and `/hotkeys` for all bindings. |
+| `/doctor` | Read-only diagnostics in TUI or RPC. Shows effective settings and why supported preferences were ignored, without printing raw config or credential values. TUI also shows whether Honeycomb's editor is active and how that affects its shortcuts. Use `/permissions` for rule details and `/hotkeys` for all bindings. |
 | `/tasks` | Read-only dashboard in TUI or RPC. Goal state and todos follow the active transcript branch. Verification is the agent's latest report, not an independent check. Use `/goal` to manage the goal. |
 | `/help [command]` | Lists discovered extension, prompt and skill commands. Pi TUI built-ins are not included in discovery; `/clear` corresponds to `/new`, `/config` to `/settings`, and `/exit` to `/quit`. |
 | `/skills` | Lists loaded skill metadata and separately lists exposed skill commands; does not read skill bodies. |
@@ -117,7 +128,7 @@ not guarantee a goal will finish within the iteration budget.
 
 These four views do not start a model turn or send their output to the provider. RPC receives bounded notifications; print and JSON modes do not display the panels.
 
-For user-owned Claude commands and skills, migrate manually: review `.claude/commands/*.md` and adapt them to `.pi/prompts/*.md`, and review `.claude/skills/` for migration to `.agents/skills/`. Adapt arguments and tool names to Pi and Bi. Bi does not automatically import these files, expand shell commands, run hooks, or grant their `allowed-tools` permissions.
+For user-owned Claude commands and skills, migrate manually: review `.claude/commands/*.md` and adapt them to `.pi/prompts/*.md`, and review `.claude/skills/` for migration to `.agents/skills/`. Adapt arguments and tool names to Pi and Honeycomb. Honeycomb does not automatically import these files, expand shell commands, run hooks, or grant their `allowed-tools` permissions.
 | `/btw` | Idle TUI only, outside Plan and No prompts. After confirmation, the active provider receives the question, but no main transcript, project files, or tools. Esc cancels. Usage is shown separately in the overlay. Provider retention policies still apply. Inline questions can appear in Pi's input history; use bare `/btw` for a separate input field. |
 | `/rewind` | Idle TUI only, outside Plan and No prompts. Previews the affected paths and always asks for confirmation. Supports tracked `edit`, `write`, `apply_patch`, and `notebook_edit`; a newly created file can be removed, but parent directories are left in place. Refuses changed files. Multi-file rollback is best-effort and reports incomplete restores. History is bounded and in memory; it does not survive branch changes, reload, or session switch. Shell commands, Git state, and conversation history are not rewound. |
 
@@ -137,7 +148,7 @@ scan and the results. It does not parse project `.gitignore` files.
 `notebook_edit` edits the source of one existing cell in a local nbformat 4
 `.ipynb` file (up to 1 MiB). Read the notebook first, then provide `path`,
 zero-based `cell_index`, exact `old_source`, and `new_source`. For array sources,
-join the strings without adding separators. Bi previews the change and requires
+join the strings without adding separators. Honeycomb previews the change and requires
 one-time approval; cells are never executed, and bytes outside the selected
 source value are preserved. Both the filesystem and agent groups must be enabled
 so the edit can be tracked by `/rewind`. This tool is unavailable in Plan mode.
@@ -146,7 +157,7 @@ so the edit can be tracked by `/rewind`. This tool is unavailable in Plan mode.
 
 In an idle, trusted Pi terminal, open `/lsp`. Use the arrow keys and Enter to
 choose **TypeScript / JavaScript** or **Use an existing server**, or Esc to exit.
-On macOS/Linux with npm on `PATH`, Bi can download the displayed versions from
+On macOS/Linux with npm on `PATH`, Honeycomb can download the displayed versions from
 npm and install them under `~/.bi-lsp/` only after confirmation. npm lifecycle
 scripts are disabled, and project and global npm packages are not changed. The
 existing-server option takes an absolute executable path outside the workspace
@@ -163,7 +174,7 @@ Positions are zero-based UTF-16. `references` and `hover` also take a position;
 
 Only use a server you trust: it receives the source file and workspace path,
 and can read other files or run code under your user account. This is not a
-sandbox. Bi does not honor server requests for client actions (such as applying
+sandbox. Honeycomb does not honor server requests for client actions (such as applying
 edits); returned locations are limited to permitted workspace files. Each request
 has an eight-second deadline, so cold or large projects may time out.
 
@@ -188,7 +199,7 @@ Pi's working directory, remove worktrees, or create branches.
 
 Launch Pi with `pi -e ./ --bi-web-fetch` in a trusted workspace. Ask the model,
 for example, “Read `https://example.org/` and summarize it.” The model proposes
-URLs via `web_fetch`; Bi previews the full destination and asks for approval on
+URLs via `web_fetch`; Honeycomb previews the full destination and asks for approval on
 **each** request. Plan, No prompts, and noninteractive sessions cannot fetch.
 
 The tool issues an HTTPS GET to a public IPv4 address on the default port. It
@@ -203,12 +214,12 @@ model output. Returned text is untrusted. This feature does not search the web.
 
 Set `TAVILY_API_KEY` in the shell that launches Pi, then run
 `pi -e ./ --bi-web-search` in a trusted workspace. Do not put the key in
-`settings.json`, project files, or chat. If the key is missing, Bi leaves
+`settings.json`, project files, or chat. If the key is missing, Honeycomb leaves
 `web_search` inactive and shows a startup warning and a working tip.
 
-Ask the model to search for a topic. Bi previews the exact query and requires
+Ask the model to search for a topic. Honeycomb previews the exact query and requires
 one-time approval before sending it to Tavily. Tavily receives the query and
-returns up to five results to Bi; the model sees those results, not the API
+returns up to five results to Honeycomb; the model sees those results, not the API
 key. Avoid sending secrets in queries. Plan, No prompts, and noninteractive
 sessions cannot search. `web_fetch` remains separate and does not need a key.
 
@@ -220,9 +231,9 @@ exact configured server name. The flag does not configure or connect a server;
 Pi still owns connections, authentication and tool exposure.
 
 If Pi exposes `list_mcp_resources`, `list_mcp_resource_templates`, or
-`read_mcp_resource`, Bi requires the selected server explicitly and asks for
+`read_mcp_resource`, Honeycomb requires the selected server explicitly and asks for
 one-time approval for each call. Resource reads show the URI before approval.
-Bi blocks these calls without the flag, in untrusted projects, in Plan or No
+Honeycomb blocks these calls without the flag, in untrusted projects, in Plan or No
 prompts mode, and without an interactive UI. Existing deny rules can match the
 server name or URI, for example `read_mcp_resource:docs`.
 
@@ -241,7 +252,7 @@ the extension has no UI or configured policy.
 
 Managed process IDs and output belong to the Pi session that started them.
 Session replacement, branch changes, and shutdown (including reload) retire
-those IDs and cancel in-flight execution. Bi closes its process pipes and
+those IDs and cancel in-flight execution. Honeycomb closes its process pipes and
 terminates still-running managed process groups on POSIX. This is not a sandbox:
 commands that leave their process group or outlive its exited leader are not
 covered by cleanup.
@@ -266,9 +277,9 @@ all tool groups are enabled by default:
 | `ui.workingTips` | Enable TUI tips while waiting for a reply and set their delay (default: 20 seconds) |
 | `ui.tagline`, `gettingStartedTitle`, `gettingStarted` | Welcome/header copy |
 | `ui.commands`, `ui.keys`, `commandsTitle`, `keysTitle` | Header commands, key hints, and their headings |
-| `systemPrompt.core` | bi's identity and workflow instructions (each array item is one prompt line) |
+| `systemPrompt.core` | Honeycomb's identity and workflow instructions (each array item is one prompt line) |
 
-On the first session start outside Plan mode, bi creates `.pi/config.json` with the current safe
+On the first session start outside Plan mode, Honeycomb creates `.pi/config.json` with the current safe
 package defaults if it does not exist. Existing files are never overwritten.
 Projects may edit and commit this file; other `.pi` runtime data remains ignored:
 
@@ -315,10 +326,10 @@ Permission dialogs show what is being requested, including proposed file changes
 | Edits (`acceptEdits`) | Also permits ordinary project edits after path checks. Sensitive operations still require approval when eligible. |
 | Plan (`plan`) | Restricts the active tools to investigation and session bookkeeping. `plan_note` writes only `.pi/plans/<session-id>.md`; after a change, choose whether to start in Edits or Manual, keep planning, or discard the note. |
 | Auto (`auto`) | Uses the Edits rules. With no configured reviewer it falls back to asking; the injectable reviewer receives only a safe summary and times out after 15 seconds. |
-| No prompts (`dontAsk`) | Declines calls whenever either the mode gate or a bi tool requires confirmation. Launch only with `--permission-mode dontAsk`. |
+| No prompts (`dontAsk`) | Declines calls whenever either the mode gate or a Honeycomb tool requires confirmation. Launch only with `--permission-mode dontAsk`. |
 | Bypass (`bypassPermissions`) | Skips routine mode prompts for eligible calls, after interactive confirmation at launch with `--permission-mode bypassPermissions`. |
 
-The last two modes are not in the shortcut cycle. Bypass cannot be restored from a transcript without the launch flag and confirmation. An approval can be granted once or, for eligible file calls, for those exact arguments and resolved paths during the session. Bi rejects hard policy blocks before its own approval dialog: workspace file tools cannot open paths outside the workspace, including through symlinks, and protected shell redirects (including `2>/dev/null`) stay blocked. An approval from Pi or another layer cannot override these restrictions. Eligible sensitive or outside-path calls still require fresh confirmation. Deny rules take precedence over Ask and Allow; none can override a hard boundary.
+The last two modes are not in the shortcut cycle. Bypass cannot be restored from a transcript without the launch flag and confirmation. An approval can be granted once or, for eligible file calls, for those exact arguments and resolved paths during the session. Honeycomb rejects hard policy blocks before its own approval dialog: workspace file tools cannot open paths outside the workspace, including through symlinks, and protected shell redirects (including `2>/dev/null`) stay blocked. An approval from Pi or another layer cannot override these restrictions. Eligible sensitive or outside-path calls still require fresh confirmation. Deny rules take precedence over Ask and Allow; none can override a hard boundary.
 
 Optional trusted user settings live in `~/.pi/agent/permission-modes.json`. For example:
 
@@ -336,7 +347,7 @@ The mode gate is a tool-call filter, not an operating-system sandbox. It blocks 
 
 ## System prompt
 
-bi uses its own system prompt — pi's default system instruction is fully
+Honeycomb uses its own system prompt — pi's default system instruction is fully
 replaced via a `before_agent_start` handler that returns the complete prompt
 for every run.
 
