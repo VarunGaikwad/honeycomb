@@ -13,11 +13,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/VarunGaikwad/bi.git"
+    "url": "https://github.com/VarunGaikwad/honeycomb.git"
   },
-  "homepage": "https://github.com/VarunGaikwad/bi#readme",
+  "homepage": "https://github.com/VarunGaikwad/honeycomb#readme",
   "bugs": {
-    "url": "https://github.com/VarunGaikwad/bi/issues"
+    "url": "https://github.com/VarunGaikwad/honeycomb/issues"
   },
   "author": "Varun Gaikwad",
   "license": "ISC",
