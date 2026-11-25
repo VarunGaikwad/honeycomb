@@ -5,12 +5,17 @@ import { ensureQuietStartup, registerSystemInstruction, registerTools } from './
 import {
   registerBtwCommand,
   registerDiffCommand,
+  registerDiscoveryCommands,
   registerDoctorCommand,
   registerGoalCommand,
   registerInitCommand,
+  registerPlanCommand,
   registerReviewCommand,
+  registerSecurityReviewCommand,
   registerSimplifyCommand,
   registerTasksCommand,
+  registerVerifyCommand,
+  registerWorktreeCommand,
 } from './commands/index.ts';
 import { installTui } from './tui/index.ts';
 import { registerWorkingFeedback } from './tui/working-feedback.ts';
@@ -25,12 +30,17 @@ export default function (pi: ExtensionAPI) {
   registerSystemInstruction(pi, permissionModes);
   registerBtwCommand(pi, permissionModes);
   registerDiffCommand(pi, permissionModes);
+  registerDiscoveryCommands(pi, permissionModes);
   registerDoctorCommand(pi, permissionModes);
   registerInitCommand(pi);
+  registerPlanCommand(pi, permissionModes);
   registerGoalCommand(pi);
   registerReviewCommand(pi);
+  registerSecurityReviewCommand(pi, permissionModes);
   registerSimplifyCommand(pi);
   registerTasksCommand(pi);
+  registerVerifyCommand(pi, permissionModes);
+  registerWorktreeCommand(pi, permissionModes);
   registerWorkingFeedback(pi);
 
   pi.on('session_start', async (_event, ctx) => {

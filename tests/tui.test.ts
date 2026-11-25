@@ -122,9 +122,11 @@ test('/permissions displays rule sources and recent denials without exposing arg
     h.ctx.cwd = cwd;
     await mkdir(join(cwd, '.pi'));
     await writeFile(join(cwd, '.pi', 'permission-modes.json'), '{"ask":["write:docs/*"],"deny":["read:.env*"]}');
-    let invoke: any;
-    registerPermissionRules({ registerCommand(name: string, command: any) { assert.equal(name, 'permissions'); invoke = command.handler; } } as any,
+    const commands = new Map<string, any>();
+    registerPermissionRules({ registerCommand(name: string, command: any) { commands.set(name, command.handler); } } as any,
       () => ({ mode: 'Plan', approvals: 1, denials: [{ tool: 'edit', reason: 'Plan mode blocks mutation' }] }));
+    const invoke = commands.get('permissions');
+    assert.equal(commands.get('allowed-tools'), invoke);
     const opened = invoke('', h.ctx);
     await setImmediate();
     assert.match(h.component.render(80).join('\n'), /Mode: Plan.*1 saved/);

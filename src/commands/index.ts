@@ -1,8 +1,13 @@
 export { registerBtwCommand } from './btw.ts';
 export { registerDiffCommand } from './diff.ts';
+export { registerDiscoveryCommands } from './discovery.ts';
 export { registerDoctorCommand } from './doctor.ts';
 export { registerGoalCommand } from './goal/index.ts';
 export { registerInitCommand } from './init.ts';
+export { registerPlanCommand } from './plan.ts';
 export { registerReviewCommand } from './review.ts';
+export { registerSecurityReviewCommand } from './security-review.ts';
 export { registerSimplifyCommand } from './simplify.ts';
 export { registerTasksCommand } from './tasks.ts';
+export { registerVerifyCommand } from './verify.ts';
+export { registerWorktreeCommand } from './worktree.ts';

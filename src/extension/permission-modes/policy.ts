@@ -2,6 +2,11 @@ import path from 'node:path';
 import { lstatSync, readdirSync } from 'node:fs';
 import { isProtectedWrite, isWithin, resolvePermissionPath } from './paths.ts';
 import { classifyShell } from './shell.ts';
+import { isMcpResourceTool, validMcpResourceArgs } from './mcp-resources.ts';
+import { validNotebookEdit } from '../../tools/notebook.ts';
+import { validLspArgs } from '../../tools/lsp.ts';
+import { parseWebUrl, validWebFetchArgs } from '../../tools/web-fetch.ts';
+import { validWebSearchArgs } from '../../tools/web-search.ts';
 
 export type Decision = { action: 'allow' | 'ask' | 'deny'; reason: string; source?: 'rule' | 'default' | 'boundary' };
 export interface PermissionRules { allow?: string[]; ask?: string[]; deny?: string[] }
@@ -37,6 +42,12 @@ function globExpression(glob: string): RegExp {
 function matchesRule(tool: string, args: Record<string, unknown>, rule: string, cwd: string): boolean {
   const split = rule.indexOf(':');
   if (split < 1 || rule.slice(0, split) !== tool) return false;
+  if (tool === 'web_fetch') return globExpression(rule.slice(split + 1)).test(parseWebUrl(args.url)?.href ?? '');
+  if (tool === 'web_search') return globExpression(rule.slice(split + 1)).test(String(args.query));
+  if (isMcpResourceTool(tool)) {
+    const matches = globExpression(rule.slice(split + 1));
+    return [args.server, args.uri].some(value => typeof value === 'string' && matches.test(value));
+  }
   const values = ['bash', 'background', 'terminal'].includes(tool) ? [args.command, args.input] : [args.path, args.source, args.destination, ...(Array.isArray(args.edits) ? args.edits.map(edit => edit && typeof edit === 'object' ? (edit as Record<string, unknown>).path : undefined) : [])];
   if (!values.some(value => typeof value === 'string')) values.push(JSON.stringify(args));
   const rulePath = rule.slice(split + 1);
@@ -87,9 +98,20 @@ export function decidePermission(mode: string, toolName: string, input: unknown,
   if (!input || typeof input !== 'object' || Array.isArray(input) || typeof cwd !== 'string' || !cwd)
     return result('deny', 'Invalid tool arguments or working directory');
   const args = input as Record<string, unknown>;
-  const writes: Record<string, string[]> = { write: ['path'], edit: ['path'], mkdir: ['path'], delete: ['path'], copy: ['destination'], move: ['source', 'destination'] };
-  const readTools = ['read', 'ls', 'grep', 'find'];
-  const readPath = readTools.includes(toolName) ? (args.path ?? (toolName === 'read' ? undefined : '.')) : undefined;
+  if (isMcpResourceTool(toolName)) {
+    if (!validMcpResourceArgs(toolName, args)) return result('deny', 'MCP resource calls require a server and valid resource arguments');
+    if (mode === 'plan' || mode === 'dontAsk') return result('deny', 'This mode blocks MCP resource calls');
+    if (rules.deny?.some(rule => matchesRule(toolName, args, rule, cwd))) return result('deny', 'Denied by permission rule', 'rule');
+    return result('ask', 'MCP resources require one-time approval');
+  }
+  if (toolName === 'notebook_edit' && !validNotebookEdit(args)) return result('deny', 'Invalid notebook edit arguments');
+  const writes: Record<string, string[]> = { write: ['path'], edit: ['path'], notebook_edit: ['path'], mkdir: ['path'], delete: ['path'], copy: ['destination'], move: ['source', 'destination'] };
+  const readTools = ['read', 'ls', 'grep', 'find', 'glob'];
+  if (toolName === 'web_search' && !validWebSearchArgs(args)) return result('deny', 'Invalid web search query');
+  if (toolName === 'web_fetch' && !validWebFetchArgs(args)) return result('deny', 'Web fetch requires a public HTTPS URL without credentials or a custom port');
+  if (toolName === 'lsp' && !validLspArgs(args)) return result('deny', 'Invalid LSP arguments');
+  const readPath = toolName === 'lsp' ? args.path : readTools.includes(toolName)
+    ? (args.path === undefined && toolName !== 'read' ? '.' : args.path) : undefined;
   const writePaths: unknown[] = (writes[toolName] ?? []).map(field => args[field]);
   const readPaths: unknown[] = readPath === undefined ? [] : [readPath];
   if (readTools.includes(toolName) && readPath === undefined) return result('deny', 'Missing read path');
@@ -102,17 +124,29 @@ export function decidePermission(mode: string, toolName: string, input: unknown,
     }
   }
   let outside = false, sensitive = false;
-  const check = (target: unknown, write: boolean): Decision | undefined => {
+  const check = (target: unknown, write: boolean, workspaceOnly: boolean): Decision | undefined => {
     if (typeof target !== 'string' || !target || target.includes('\0')) return result('deny', 'Invalid path');
     try {
-      const lexical = path.resolve(cwd, target), resolved = resolvePermissionPath(cwd, target), root = resolvePermissionPath(cwd, '.');
-      if (write && (isProtectedWrite(lexical) || isProtectedWrite(resolved))) return result('deny', 'Protected path');
-      if (!write && (isProtectedWrite(lexical) || isProtectedWrite(resolved))) sensitive = true;
-      if (!isWithin(root, lexical) || !isWithin(root, resolved)) outside = true;
+      const root = resolvePermissionPath(cwd, '.');
+      const lexical = path.resolve(cwd, target);
+      // The filesystem and patch tools resolve relative inputs from the real cwd.
+      // Glob, LSP and notebook edits first check the logical workspace path.
+      const logicalRoot = ['glob', 'lsp', 'notebook_edit'].includes(toolName);
+      const base = workspaceOnly && !logicalRoot ? root : path.resolve(cwd);
+      const candidate = path.resolve(base, target);
+      if (workspaceOnly && !isWithin(base, candidate)) return result('deny', 'Path is outside the working directory');
+      const resolved = resolvePermissionPath(base, candidate);
+      if (workspaceOnly && !isWithin(root, resolved)) return result('deny', 'Path is outside the working directory');
+      if (isProtectedWrite(lexical) || isProtectedWrite(candidate) || isProtectedWrite(resolved)) {
+        if (write) return result('deny', 'Protected path');
+        sensitive = true;
+      }
+      if (!workspaceOnly && (!isWithin(root, lexical) || !isWithin(root, resolved))) outside = true;
     } catch { return result('deny', 'Unable to resolve path safely'); }
   };
-  for (const target of writePaths) { const failure = check(target, true); if (failure) return failure; }
-  for (const target of readPaths) { const failure = check(target, false); if (failure) return failure; }
+  for (const target of writePaths) { const failure = check(target, true, true); if (failure) return failure; }
+  for (const target of readPaths) { const failure = check(target, false, true); if (failure) return failure; }
+  if (sensitive && ['glob', 'lsp'].includes(toolName)) return result('deny', `${toolName === 'glob' ? 'Glob' : 'LSP'} requires a non-protected workspace path`);
   if (['delete', 'move', 'copy'].includes(toolName)) {
     const target = toolName === 'delete' ? args.path : args.source;
     try {
@@ -129,7 +163,7 @@ export function decidePermission(mode: string, toolName: string, input: unknown,
     const shell = classifyShell(args.command, cwd);
     if (shell.kind === 'deny') return result('deny', shell.reason);
     if (shell.kind === 'unknown') shellUnknown = true;
-    else for (const operand of shell.paths) { const failure = check(operand, false); if (failure) return failure; }
+    else for (const operand of shell.paths) { const failure = check(operand, false, false); if (failure) return failure; }
   } else if (toolName === 'bash' || toolName === 'background') return result('deny', 'Missing command');
   if (toolName === 'write' && typeof args.content !== 'string') return result('deny', 'Invalid write content');
   if (toolName === 'plan_note' && typeof args.content !== 'string') return result('deny', 'Invalid plan note content');
@@ -144,8 +178,10 @@ export function decidePermission(mode: string, toolName: string, input: unknown,
         typeof ((item as Record<string, unknown>).new_str ?? (item as Record<string, unknown>).newText) === 'string'))) return result('deny', 'Invalid edit arguments');
   }
   if (toolName === 'grep' && typeof (args.query ?? args.pattern) !== 'string') return result('deny', 'Invalid search query');
+  if (toolName === 'glob' && (typeof args.pattern !== 'string' || !args.pattern || args.pattern.length > 256)) return result('deny', 'Invalid glob pattern');
   if (toolName === 'find' && typeof (args.name ?? args.pattern) !== 'string') return result('deny', 'Invalid find pattern');
   if (toolName === 'read' && ['offset', 'limit'].some(key => args[key] !== undefined && (typeof args[key] !== 'number' || !Number.isInteger(args[key]) || (args[key] as number) < 1))) return result('deny', 'Invalid read range');
+  if (toolName === 'git_commit' && (typeof args.message !== 'string' || !args.message.trim() || args.message.includes('\0'))) return result('deny', 'Invalid commit message');
   if (toolName === 'git_branch' && args.name !== undefined && typeof args.name !== 'string') return result('deny', 'Invalid branch name');
   if (toolName === 'git_diff' && args.staged !== undefined && typeof args.staged !== 'boolean') return result('deny', 'Invalid diff arguments');
   if (toolName === 'git_log' && args.limit !== undefined && (typeof args.limit !== 'number' || !Number.isInteger(args.limit) || args.limit < 1 || args.limit > 100)) return result('deny', 'Invalid log limit');
@@ -159,6 +195,13 @@ export function decidePermission(mode: string, toolName: string, input: unknown,
     return result('deny', 'Plan mode blocks mutation, execution and delegation');
   const matches = (items?: string[]) => items?.some(rule => matchesRule(toolName, readPath === undefined ? args : { ...args, path: readPath }, rule, cwd)) ?? false;
   if (matches(rules.deny)) return result('deny', 'Denied by permission rule', 'rule');
+  if (toolName === 'web_search') return mode === 'dontAsk'
+    ? result('deny', 'No prompts mode blocks web search')
+    : result('ask', 'Tavily web search requires one-time approval');
+  if (toolName === 'web_fetch') return mode === 'dontAsk'
+    ? result('deny', 'No prompts mode blocks web fetch')
+    : result('ask', 'Public web fetch requires one-time approval');
+  if (toolName === 'lsp' && rules.deny?.some(rule => matchesRule('read', { path: args.path }, rule, cwd))) return result('deny', 'LSP source file is restricted by read policy');
   if (matches(rules.ask)) return result(mode === 'dontAsk' ? 'deny' : 'ask', 'Requires approval by permission rule', 'rule');
   if (shellUnknown) return result(mode === 'dontAsk' ? 'deny' : 'ask', 'Unclassified shell command requires approval');
   if (sensitive || outside) return result(mode === 'dontAsk' ? 'deny' : 'ask', 'Sensitive or outside path requires approval');

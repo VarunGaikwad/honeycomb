@@ -28,6 +28,7 @@ export function registerDiffCommand(pi: ExtensionAPI, permissions: PermissionCon
       const current = () => permissions.mode === mode && idle() && ctx.sessionManager.getLeafId() === leaf && ctx.sessionManager.getSessionId() === sessionId;
       let files: File[] = [], selected = 0, picking = true, sensitiveApproved = false;
       let approval: string | undefined;
+      let reuseListing = false;
       while (current()) {
         const decision = () => {
           const config = loadPermissionRules(ctx.cwd, () => {});
@@ -50,7 +51,9 @@ export function registerDiffCommand(pi: ExtensionAPI, permissions: PermissionCon
           const update = async () => {
             try {
               if (!check() || (initial.action !== 'allow' && approval !== scope)) rows = [literal(initial.reason)];
-              else {
+              else if (picking && reuseListing) {
+                rows = files.length ? [] : ['No changes.'];
+              } else {
                 const value = await runDiff({ workingDirectory: ctx.cwd, sessionId, signal: abort.signal,
                   confirmSensitiveRead: async description => { sensitive = description; return sensitiveApproved && check(); },
                 }, staged, file ? { paths: file.paths } : { list: true });
@@ -80,7 +83,7 @@ export function registerDiffCommand(pi: ExtensionAPI, permissions: PermissionCon
                 const title = `${status} ${paths.map(name => literal(name)).join(' → ')}`;
                 return offset + i === selected ? theme.fg('accent', `> ${title}`) : `  ${title}`;
               }) : rows.slice(offset, offset + page);
-              return [theme.fg('accent', `Git diff — ${staged ? 'staged' : 'unstaged'}`), 'Tracked files only; submodules omitted.', ...body,
+              return [theme.fg('accent', `Git diff — ${staged ? 'staged' : 'unstaged'}`), reuseListing && picking ? 'Previously loaded file list; switch tabs to refresh.' : 'Tracked files only; submodules omitted.', ...body,
                 picking ? 'Tab: switch · ↑/↓: select · Enter: open · Esc: close' : 'Tab: switch · ↑/↓/PgUp/PgDn: scroll · n/p: file · Esc: back'].map(line => fit(line, width));
             },
             handleInput(data) {
@@ -107,9 +110,9 @@ export function registerDiffCommand(pi: ExtensionAPI, permissions: PermissionCon
           continue;
         }
         sensitiveApproved = false;
-        if (action === 'switch') { staged = !staged; approval = undefined; files = []; selected = 0; picking = true; }
-        else if (action === 'back') picking = true;
-        else { selected = action; picking = false; }
+        if (action === 'switch') { staged = !staged; approval = undefined; files = []; selected = 0; picking = true; reuseListing = false; }
+        else if (action === 'back') { picking = true; reuseListing = true; }
+        else { selected = action; picking = false; reuseListing = false; }
       }
     },
   });

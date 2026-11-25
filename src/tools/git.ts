@@ -9,13 +9,13 @@ const execFileAsync = promisify(execFile);
 // Read operations must not refresh the on-disk index or invoke repo-configured helpers.
 const readOnlyFlags = ['--no-optional-locks', '--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'];
 
-async function disableWorktreeFilters(context: ToolContext, timeout = 30_000): Promise<string[]> {
+export async function disableWorktreeFilters(context: ToolContext, timeout = 30_000, env?: NodeJS.ProcessEnv): Promise<string[]> {
   try {
-    const { stdout } = await execFileAsync('git', [...readOnlyFlags, 'config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|process|required)$'], {
-      cwd: context.workingDirectory, signal: context.signal, timeout,
+    const { stdout } = await execFileAsync('git', [...readOnlyFlags, 'config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process|required)$'], {
+      cwd: context.workingDirectory, signal: context.signal, timeout, env,
     });
     return [...new Set(stdout.split('\0').filter(Boolean))].flatMap(key => {
-      if (!/^filter\.[^=\r\n]+\.(clean|process|required)$/.test(key)) throw new Error('Invalid Git filter key');
+      if (!/^filter\.[^=\r\n]+\.(clean|smudge|process|required)$/.test(key)) throw new Error('Invalid Git filter key');
       return ['-c', `${key}=${key.endsWith('.required') ? 'false' : ''}`];
     });
   } catch (error) {
@@ -87,7 +87,7 @@ export async function runDiff(context: ToolContext, staged: boolean, selection?:
     const paths = selection && 'paths' in selection ? selection.paths : [];
     const args = [...readOnlyFlags, ...filters, '--literal-pathspecs', '-C', root, 'diff', '--raw', '-z', ...(listing ? [] : ['--patch']), '--no-color', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', ...(staged ? ['--cached'] : []), '--', ...paths];
     const { stdout, stderr } = await execFileAsync('git', args, options);
-    if (!stdout) return { success: true, output: stderr.trimEnd() };
+    if (!stdout) return listing ? { success: true, metadata: { files: [], root } } : { success: true, output: stderr.trimEnd() };
 
     let cursor = 0;
     let sensitive = false;
@@ -127,7 +127,7 @@ export async function runDiff(context: ToolContext, staged: boolean, selection?:
     if (sensitive && !await context.confirmSensitiveRead?.('The diff contains sensitive paths or its paths could not be classified.')) {
       return { success: false, error: 'Sensitive diff was not approved' };
     }
-    if (listing) return { success: true, metadata: { files } };
+    if (listing) return { success: true, metadata: { files, root } };
     return { success: true, output: [stdout.slice(cursor + 1).trimEnd(), stderr.trimEnd()].filter(Boolean).join('\n') };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

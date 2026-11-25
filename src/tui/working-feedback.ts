@@ -1,8 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { BI_CONFIG } from '../config/index.ts';
+import { needsLspSetup } from '../extension/lsp-menu.ts';
+import { getTavilyKey, WEB_SEARCH_FLAG, webSearchSetupTip } from '../tools/web-search.ts';
 import { ASCII, fit } from './text.ts';
 
 const WIDGET = 'bi-working-tip';
+const lspTip = 'Use /lsp when idle to set up optional code navigation.';
 const tips = [
   'Use /tasks when idle to see the current goal and todos.',
   'Use /diff when idle to review staged and unstaged changes.',
@@ -21,7 +24,7 @@ function toolLabel(name: string): string {
 export function registerWorkingFeedback(pi: ExtensionAPI, options = BI_CONFIG.ui.workingTips): void {
   let run: {
     ui: ExtensionContext['ui']; tools: Map<string, string>; phase: string;
-    replied: boolean; shown: boolean; visible: boolean; lastLabel?: string;
+    replied: boolean; shown: boolean; visible: boolean; lastLabel?: string; tips: string[];
     timer?: ReturnType<typeof setTimeout>;
   } | undefined;
   let waiting = false;
@@ -50,7 +53,7 @@ export function registerWorkingFeedback(pi: ExtensionAPI, options = BI_CONFIG.ui
         current.timer = undefined;
         if (run !== current || waiting || current.replied || current.shown) return;
         current.shown = current.visible = true;
-        const tip = `Tip: ${tips[tipIndex++ % tips.length]}`;
+        const tip = `Tip: ${current.tips[tipIndex++ % current.tips.length]}`;
         current.ui.setWidget(WIDGET, (_tui, theme) => ({
           render: width => width < 16 ? [] : [theme.fg('dim', fit(tip, width))],
           invalidate() {},
@@ -72,7 +75,17 @@ export function registerWorkingFeedback(pi: ExtensionAPI, options = BI_CONFIG.ui
 
   pi.on('agent_start', (_event, ctx) => {
     if (ctx.mode !== 'tui') return;
-    run ??= { ui: ctx.ui, tools: new Map(), phase: 'Working', replied: false, shown: false, visible: false };
+    if (!run) {
+      const current = run = { ui: ctx.ui, tools: new Map(), phase: 'Working', replied: false, shown: false, visible: false, tips: [...tips] };
+      if (options.enabled && pi.getFlag?.(WEB_SEARCH_FLAG) === true && !getTavilyKey() &&
+          pi.getAllTools?.().some(tool => tool.name === 'web_search')) current.tips.unshift(webSearchSetupTip);
+      if (options.enabled && pi.getAllTools?.().some(tool => tool.name === 'lsp')) {
+        // Probe in the background; starting a run must not wait on the filesystem.
+        void needsLspSetup(pi, ctx.cwd).then(missing => {
+          if (missing && run === current) current.tips.push(lspTip);
+        });
+      }
+    }
     run.tools.clear();
     run.phase = 'Working';
     refresh();

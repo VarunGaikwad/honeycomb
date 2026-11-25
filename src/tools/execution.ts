@@ -4,6 +4,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { BI_CONFIG } from '../config/index.ts';
 import { CONFIG_LIMITS, OUTPUT_TRUNCATION_MARKER } from '../config/limits.ts';
 import type {
+  DispatchResult,
   ExecutionOptions,
   ManagedProcess,
   Tool,
@@ -13,18 +14,21 @@ import type {
 
 /** Shared process lifecycle for foreground and background execution tools. */
 export class ProcessManager {
-  private readonly processes = new Map<string, ManagedProcess>();
+  private readonly sessions = new Map<string, Map<string, ManagedProcess>>();
 
   constructor(private readonly maxOutputChars = BI_CONFIG.output.maxChars) {
     validateOutputLimit(maxOutputChars);
   }
 
   start(command: string, context: ToolContext): { id: string; process: ManagedProcess } {
+    context.signal?.throwIfAborted();
+    if (!context.sessionId?.trim()) throw new Error('Managed execution requires a session ID');
     const maxOutputChars = context.projectConfig?.output?.maxChars ?? this.maxOutputChars;
     validateOutputLimit(maxOutputChars);
     const child = spawn('/bin/sh', ['-c', command], {
       cwd: context.workingDirectory,
       env: process.env,
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const managed: ManagedProcess = { child, output: '' };
@@ -35,21 +39,45 @@ export class ProcessManager {
     child.stdout?.on('end', () => appendOutput(managed, stdoutDecoder.end(), maxOutputChars));
     child.stderr?.on('end', () => appendOutput(managed, stderrDecoder.end(), maxOutputChars));
     child.on('exit', (code, signal) => { managed.exited = { code, signal }; });
+    child.on('error', () => { if (!child.pid) managed.exited = { code: null, signal: null }; });
+    child.stdin?.on('error', () => { /* The process may close stdin during a write. */ });
     const id = randomUUID();
-    this.processes.set(id, managed);
+    const processes = this.sessions.get(context.sessionId) ?? new Map<string, ManagedProcess>();
+    processes.set(id, managed);
+    this.sessions.set(context.sessionId, processes);
     return { id, process: managed };
   }
 
-  get(id: string): ManagedProcess | undefined {
-    return this.processes.get(id);
+  get(id: string, sessionId: string): ManagedProcess | undefined {
+    return this.sessions.get(sessionId)?.get(id);
   }
 
-  remove(id: string): boolean {
-    return this.processes.delete(id);
+  list(sessionId: string): Array<{ id: string; running: boolean; output: string }> {
+    return Array.from(this.sessions.get(sessionId) ?? [], ([id, p]) => ({ id, running: !p.exited, output: p.output }));
   }
 
-  list(): Array<{ id: string; running: boolean; output: string }> {
-    return [...this.processes].map(([id, p]) => ({ id, running: !p.exited, output: p.output }));
+  /** This manager belongs to one extension instance; retire all its handles on a Pi boundary. */
+  clear(): void {
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    for (const processes of sessions) for (const managed of processes.values()) {
+      terminate(managed, 'SIGKILL');
+      managed.child.stdin?.destroy();
+      managed.child.stdout?.destroy();
+      managed.child.stderr?.destroy();
+    }
+  }
+}
+
+function terminate(managed: ManagedProcess, signal: NodeJS.Signals): boolean {
+  const { child } = managed;
+  if (managed.exited || !child.pid) return true;
+  try {
+    if (process.platform === 'win32') return child.kill(signal);
+    process.kill(-child.pid, signal);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
   }
 }
 
@@ -98,8 +126,8 @@ export function createExecutionTools(
       const { id } = processManager.start(command, c);
       return { success: true, output: id, metadata: { processId: id } };
     }),
-    execTool('process', 'Inspect a managed process and its captured output', { processId: 'string' }, async (a) => {
-      const p = processManager.get(str(a, 'processId'));
+    execTool('process', 'Inspect a managed process and its captured output', { processId: 'string' }, async (a, c) => {
+      const p = processManager.get(str(a, 'processId'), c.sessionId);
       if (!p) return { success: false, error: 'Process not found' };
       return { success: true, output: p.output, metadata: {
         running: !p.exited,
@@ -108,20 +136,21 @@ export function createExecutionTools(
         outputTruncated: p.outputTruncated === true,
       } };
     }),
-    execTool('kill', 'Terminate a managed process', { processId: 'string', force: 'boolean?' }, async (a) => {
+    execTool('kill', 'Terminate a managed process', { processId: 'string', force: 'boolean?' }, async (a, c) => {
       const id = str(a, 'processId');
-      const p = processManager.get(id);
+      const p = processManager.get(id, c.sessionId);
       if (!p) return { success: false, error: 'Process not found' };
-      if (!p.exited) p.child.kill(a.force === true ? 'SIGKILL' : 'SIGTERM');
+      if (!terminate(p, a.force === true ? 'SIGKILL' : 'SIGTERM')) return { success: false, error: 'Could not terminate the managed process' };
       return { success: true, output: `Termination requested for ${id}` };
     }),
     execTool('terminal', 'Start an interactive shell process or send input to one', { command: 'string?', processId: 'string?', input: 'string?' }, async (a, c) => {
       if (typeof a.input === 'string') {
         if (a.command !== undefined) return { success: false, error: 'Terminal command and input are mutually exclusive' };
-        const p = processManager.get(str(a, 'processId'));
+        const id = str(a, 'processId');
+        const p = processManager.get(id, c.sessionId);
         if (!p?.child.stdin?.writable) return { success: false, error: 'Terminal process not found or stdin is closed' };
         if (!c.confirmCommand || !await c.confirmCommand(`Send terminal input to ${a.processId}:\n${a.input}`)) return { success: false, error: 'Terminal input was not approved' };
-        if (c.signal?.aborted || !p.child.stdin.writable) return { success: false, error: 'Terminal input cancelled or stdin closed' };
+        if (c.signal?.aborted || processManager.get(id, c.sessionId) !== p || !p.child.stdin.writable) return { success: false, error: 'Terminal input cancelled or stdin closed' };
         p.child.stdin.write(a.input);
         return { success: true, output: p.output, metadata: {
           running: !p.exited,
@@ -169,26 +198,31 @@ async function waitForProcess(
   process: ManagedProcess,
   timeoutMs: number,
   signal?: AbortSignal,
-): Promise<ToolResult> {
+): Promise<DispatchResult> {
   if (process.exited) return processResult(process);
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (result: ToolResult) => {
+    const finish = (result: DispatchResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
+      process.child.removeListener('exit', exited);
+      process.child.removeListener('error', failed);
       resolve(result);
     };
     const timer = setTimeout(() => {
-      process.child.kill('SIGTERM');
+      terminate(process, 'SIGKILL');
       finish({ success: false, output: process.output, error: 'Execution timed out' });
     }, timeoutMs);
     const abort = () => {
-      process.child.kill('SIGTERM');
-      finish({ success: false, output: process.output, error: 'Execution cancelled' });
+      terminate(process, 'SIGKILL');
+      finish({ success: false, error: 'Execution cancelled', errorCode: 'OPERATION_CANCELLED' });
     };
-    process.child.once('exit', () => finish(processResult(process)));
+    const exited = () => finish(processResult(process));
+    const failed = () => finish({ success: false, error: 'Could not start the managed process' });
+    process.child.once('exit', exited);
+    process.child.once('error', failed);
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
   });

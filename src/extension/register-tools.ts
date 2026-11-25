@@ -3,13 +3,18 @@ import { Type } from 'typebox';
 import { readTodos, TODO_ENTRY } from '../commands/tasks.ts';
 import { askQuestion } from './ask-user.ts';
 import { createToolSystem } from '../tools/index.ts';
-import type { AskResult, ToolContext } from '../types/index.ts';
+import type { AskResult, DispatchResult, ToolContext } from '../types/index.ts';
 import type { PermissionController } from './permission-modes/index.ts';
 import { decidePermission } from './permission-modes/policy.ts';
 import { loadPermissionRules } from './permission-modes/rules.ts';
 import { createPermissionPrompter } from '../tui/permission-dialog.ts';
 import { literal } from '../tui/text.ts';
+import { resolvePermissionPath } from './permission-modes/paths.ts';
 import { toolPresentation } from '../tui/tool-renderer.ts';
+import { LSP_FLAG, resolveLspServer } from '../tools/lsp.ts';
+import { WEB_FETCH_FLAG } from '../tools/web-fetch.ts';
+import { getTavilyKey, WEB_SEARCH_FLAG, webSearchSetupTip } from '../tools/web-search.ts';
+import { clearLspSelection, registerLspMenu, selectedLspServer } from './lsp-menu.ts';
 
 export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionController): void {
   // Pi supplies the UI context only while executing a tool. Keep the callback
@@ -17,7 +22,7 @@ export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionCont
   let activeContext: ExtensionContext | undefined;
   const interactive = Boolean(process.stdin.isTTY);
   const prompter = permissionModes?.prompter ?? createPermissionPrompter();
-  const { registry, dispatcher } = createToolSystem(interactive ? {
+  const { registry, dispatcher, processManager } = createToolSystem(interactive ? {
     askUser: async (questions): Promise<AskResult> => {
       const ctx = activeContext;
       if (!ctx?.hasUI || permissionModes?.mode === 'dontAsk') return { status: 'declined' };
@@ -30,6 +35,51 @@ export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionCont
       return { status: 'answered', answers };
     },
   } : {});
+
+  let sessionLifetime = new AbortController();
+  const retireProcesses = (renew: boolean) => {
+    sessionLifetime.abort();
+    processManager.clear();
+    if (renew) sessionLifetime = new AbortController();
+  };
+  if (registry.has('lsp')) {
+    pi.registerFlag?.(LSP_FLAG, { type: 'string', description: 'Opt into LSP with an absolute path to a trusted local stdio server' });
+    if (permissionModes) registerLspMenu(pi, permissionModes, () => sessionLifetime.signal);
+  }
+  if (registry.has('web_fetch')) {
+    pi.registerFlag?.(WEB_FETCH_FLAG, { type: 'boolean', description: 'Opt into model-initiated public HTTPS fetches with per-request approval' });
+  }
+  if (registry.has('web_search')) pi.registerFlag?.(WEB_SEARCH_FLAG, {
+    type: 'boolean', description: 'Opt into Tavily web search with per-query approval',
+  });
+  pi.on?.('session_start', async (_event, ctx) => {
+    retireProcesses(true);
+    clearLspSelection(pi);
+    if (registry.has('web_fetch') && permissionModes && ctx.hasUI && ctx.isProjectTrusted?.() &&
+        !['plan', 'dontAsk'].includes(permissionModes.mode) && pi.getFlag?.(WEB_FETCH_FLAG) === true) {
+      const tools = pi.getActiveTools();
+      if (!tools.includes('web_fetch')) pi.setActiveTools([...tools, 'web_fetch']);
+    }
+    if (registry.has('web_search') && pi.getFlag?.(WEB_SEARCH_FLAG) === true && ctx.hasUI) {
+      if (!getTavilyKey()) ctx.ui.notify(webSearchSetupTip, 'warning');
+      else if (permissionModes && ctx.isProjectTrusted?.() && !['plan', 'dontAsk'].includes(permissionModes.mode)) {
+        const tools = pi.getActiveTools();
+        if (!tools.includes('web_search')) pi.setActiveTools([...tools, 'web_search']);
+      }
+    }
+    const flag = pi.getFlag?.(LSP_FLAG);
+    if (!flag || !registry.has('lsp') || !permissionModes || permissionModes.mode === 'plan' || !ctx.isProjectTrusted?.()) return;
+    const lifetime = sessionLifetime.signal;
+    if (!await resolveLspServer(flag, ctx.cwd)) {
+      ctx.ui.notify('Bi LSP requires an existing executable outside the workspace.', 'warning');
+      return;
+    }
+    if (lifetime.aborted || (permissionModes.mode as string) === 'plan') return;
+    const tools = pi.getActiveTools();
+    if (!tools.includes('lsp')) pi.setActiveTools([...tools, 'lsp']);
+  });
+  pi.on?.('session_tree', () => retireProcesses(true));
+  pi.on?.('session_shutdown', () => { clearLspSelection(pi); retireProcesses(false); });
 
   let undoEpoch = 0;
   if (permissionModes) {
@@ -48,7 +98,7 @@ export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionCont
     };
     return { undoEpoch: epoch, checkUndo, confirmDestructive: (operation, targets) => prompter.confirm(ctx, `Confirm ${operation}`, literal(targets, true), signal) };
   };
-  if (permissionModes) pi.registerCommand?.('rewind', {
+  const rewindCommand: Parameters<ExtensionAPI['registerCommand']>[1] = {
     description: 'Preview and restore the last tracked Bi file operation',
     async handler(args, ctx) {
       if (!ctx.hasUI) return;
@@ -64,19 +114,27 @@ export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionCont
       });
       ctx.ui.notify(result.success ? result.output ?? 'Restored patch.' : result.error ?? 'Restore failed.', result.success ? 'info' : 'warning');
     },
-  });
+  };
+  if (permissionModes) {
+    pi.registerCommand?.('rewind', rewindCommand);
+    pi.registerCommand?.('checkpoint', { ...rewindCommand, description: 'Alias for /rewind (latest Bi file operation only)' });
+  }
 
   for (const tool of registry.list()) {
     pi.registerTool({
       name: tool.name,
       label: `🔧 ${tool.name}`,
       description: tool.description,
+      ...(['lsp', 'web_fetch', 'web_search'].includes(tool.name) ? { defaultActive: false, executionMode: 'sequential' as const } : {}),
       ...(tool.promptSnippet ? { promptSnippet: tool.promptSnippet } : {}),
       ...(tool.promptGuidelines ? { promptGuidelines: tool.promptGuidelines } : {}),
       parameters: Type.Unsafe(tool.parameters as never),
-      ...(['ask_user', 'todo', 'edit', 'write', 'apply_patch', 'undo'].includes(tool.name) ? { executionMode: 'sequential' as const } : {}),
+      ...(['ask_user', 'todo', 'edit', 'write', 'apply_patch', 'undo', 'notebook_edit'].includes(tool.name) ? { executionMode: 'sequential' as const } : {}),
       ...toolPresentation(tool.name),
-      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      async execute(toolCallId, params, callSignal, _onUpdate, ctx) {
+        const lifetime = ['bash', 'background', 'terminal', 'run_code', 'process', 'kill', 'lsp', 'web_fetch', 'web_search'].includes(tool.name)
+          ? sessionLifetime.signal : undefined;
+        const signal = lifetime && callSignal ? AbortSignal.any([callSignal, lifetime]) : lifetime ?? callSignal;
         activeContext = ctx;
         let sessionId: string;
         try {
@@ -94,23 +152,90 @@ export function registerTools(pi: ExtensionAPI, permissionModes?: PermissionCont
           if (!ctx.hasUI || mode === 'dontAsk') return false;
           return await prompter.confirm(ctx, title, text, signal) && permissionModes?.mode === mode;
         };
+        const notebookEpoch = undoEpoch;
+        const notebookMode = permissionModes?.mode;
         const context: ToolContext = {
           sessionId,
           workingDirectory: ctx.cwd,
+          ...(tool.name === 'lsp' ? { authorizeLsp: async (file: string) => {
+            if (!permissionModes || !ctx.isProjectTrusted?.() || signal?.aborted) return;
+            const server = await selectedLspServer(pi, ctx.cwd);
+            const args = params as Record<string, unknown>;
+            if (!server || signal?.aborted || !ctx.isProjectTrusted?.() || typeof args.path !== 'string' || resolvePermissionPath(ctx.cwd, args.path) !== file) return;
+            if (permissionModes.consumeCommitApproval(toolCallId, ctx, args, tool.name, server) === true) return server;
+          }, canReadLspLocation: (file: string) => {
+            if (!permissionModes || !ctx.isProjectTrusted?.() || signal?.aborted) return false;
+            const config = loadPermissionRules(ctx.cwd, () => {});
+            return !config.invalid && decidePermission(permissionModes.mode, 'read', { path: file }, ctx.cwd, config.rules).action === 'allow';
+          } } : {}),
+          ...(tool.name === 'web_fetch' ? { authorizeWebFetch: () =>
+            !!permissionModes && ctx.hasUI && !!ctx.isProjectTrusted?.() && !signal?.aborted &&
+            pi.getFlag?.(WEB_FETCH_FLAG) === true && pi.getActiveTools().includes('web_fetch') &&
+            permissionModes.consumeCommitApproval(toolCallId, ctx, params as Record<string, unknown>, tool.name) === true,
+          } : {}),
+          ...(tool.name === 'web_search' ? { authorizeWebSearch: () => {
+            if (!permissionModes || !ctx.hasUI || !ctx.isProjectTrusted?.() || signal?.aborted ||
+                pi.getFlag?.(WEB_SEARCH_FLAG) !== true || !pi.getActiveTools().includes('web_search')) return;
+            const key = getTavilyKey();
+            if (key && permissionModes.consumeCommitApproval(toolCallId, ctx, params as Record<string, unknown>, tool.name)) return key;
+          } } : {}),
           ...(tool.name === 'todo' ? { todoStore: {
             read: () => readTodos(ctx.sessionManager.getBranch()),
             write: items => { if (!signal?.aborted) pi.appendEntry(TODO_ENTRY, items); },
           } } : {}),
           signal,
-          confirmDestructive: (operation, target) => confirm(`Confirm ${operation}`, target),
+          confirmDestructive: async (operation, target) => {
+            if (tool.name === 'notebook_edit' && operation === 'edit notebook cell') {
+              try {
+                const args = params as Record<string, unknown>;
+                if (signal?.aborted || typeof args.path !== 'string' || resolvePermissionPath(ctx.cwd, args.path) !== target) return false;
+                return permissionModes?.consumeCommitApproval(toolCallId, ctx, args, tool.name) === true;
+              } catch { return false; }
+            }
+            if (tool.name === 'delete' && operation === 'delete') {
+              try {
+                const args = params as Record<string, unknown>;
+                if (signal?.aborted || typeof args.path !== 'string' || resolvePermissionPath(ctx.cwd, args.path) !== target) return false;
+                return permissionModes?.consumeCommitApproval?.(toolCallId, ctx, args, tool.name) ?? confirm('Confirm delete', target);
+              } catch { return false; }
+            }
+            const gitOperations: Record<string, string> = { git_commit: 'git commit', git_add: 'git add', git_checkout: 'git checkout', git_branch: 'create git branch' };
+            if (gitOperations[tool.name] === operation) {
+              if (signal?.aborted) return false;
+              return permissionModes?.consumeCommitApproval?.(toolCallId, ctx, params as Record<string, unknown>, tool.name)
+                ?? confirm(tool.name === 'git_commit' ? 'Commit staged changes?' : `Confirm ${operation}`, target);
+            }
+            return confirm(`Confirm ${operation}`, target);
+          },
           confirmSensitiveRead: description => confirm('Allow sensitive Git diff?', description),
-          confirmCommand: command => confirm('Run shell command?', command),
+          confirmCommand: command => {
+            const args = params as Record<string, unknown>;
+            const expected = tool.name === 'terminal' && typeof args.input === 'string'
+              ? `Send terminal input to ${args.processId}:\n${args.input}`
+              : tool.name === 'run_code' && typeof args.code === 'string'
+                ? `node --input-type=module -e '${args.code.replaceAll("'", "'\\''")}'`
+                : args.command;
+            if (command !== expected || signal?.aborted) return Promise.resolve(false);
+            const approved = permissionModes?.consumeCommitApproval?.(toolCallId, ctx, args, tool.name);
+            return approved === undefined ? confirm('Run shell command?', command) : Promise.resolve(approved);
+          },
           ...(['edit', 'write', 'apply_patch', 'undo'].includes(tool.name) ? undoContext(ctx, signal) : {}),
+          ...(tool.name === 'notebook_edit' ? {
+            undoEpoch: notebookEpoch,
+            checkNotebookEdit: () => {
+              if (!notebookMode || notebookEpoch !== undoEpoch || permissionModes?.mode !== notebookMode) return false;
+              const config = loadPermissionRules(ctx.cwd, () => {});
+              return !config.invalid && decidePermission(notebookMode, tool.name, params, ctx.cwd, config.rules).action === 'ask';
+            },
+          } : {}),
         };
-        const result = await dispatcher.dispatch(
+        const dispatched = await dispatcher.dispatch(
           { name: tool.name, arguments: params as Record<string, unknown> },
           context,
         );
+        const result: DispatchResult = lifetime?.aborted
+          ? { success: false, error: 'Tool session ended', errorCode: 'OPERATION_CANCELLED' }
+          : dispatched;
         return {
           content: [{ type: 'text' as const, text: result.output ?? result.error ?? '' }],
           details: { success: result.success, errorCode: result.errorCode, metadata: result.metadata },

@@ -1,0 +1,49 @@
+# Bi tool parity: inventory and implementation plan
+
+## Rollout status
+
+- **P0 — Discovery: complete.** The capability inventory and `/tool-search` are in place. The catalog shows active/inactive tools without running or enabling them. An opt-in history of actual tool calls is **optional and not started**.
+- **P1 — File search and process isolation: complete for the agreed scope.** `glob` supports bounded, workspace-only matching; `find` and literal `grep` are unchanged. Live `glob` returned matches in the Bi workspace and denied an outside path. Managed process handles are session-owned, with cancellation and cleanup at session/branch boundaries. Richer task fields and regex search are **optional and not started**.
+- **P2 — Optional local tools: complete for the agreed scope.**
+  - [x] **Notebook:** `notebook_edit` implements source-only cell updates, one-time preview/approval, stale-file checks, and `/rewind`. Automated coverage passed; no live Pi smoke test recorded.
+  - [x] **LSP setup:** `/lsp` provides a menu, confirmed user-local TypeScript install or existing-server selection, and separate session enablement. The working tip points to `/lsp` when no supported server is found. The user confirmed live install and enable in `../test`.
+  - [x] **LSP diagnostics:** Live hover worked but diagnostics timed out because the TypeScript server requires the `textDocument.publishDiagnostics` client capability. After advertising it, direct calls through Bi's LSP tool to the installed TypeScript server returned both a type error and `[]` for a clean file. A fake-server test covers push diagnostics and rejects unrelated/stale notifications.
+  - [x] **Git worktree:** Added `/worktree list`, `create <directory-name>`, and `leave`, with Git fixture tests. Creation requires a trusted, clean checkout and explicit confirmation. Leave only shows where to start a new session; it never removes the worktree or changes Pi's working directory.
+  - **PowerShell:** Deferred unless Windows support is requested; requires its own permission and platform tests.
+- **P3 — Network and host integrations: in progress.** Model-initiated `web_fetch` is implemented behind `--bi-web-fetch` with per-URL approval. It accepts public HTTPS text on IPv4, pins the validated DNS address, and never follows redirects automatically. Offline tests cover permissions and transport, and the user confirmed a live fetch in Pi. Tavily `web_search` is implemented behind `--bi-web-search` and `TAVILY_API_KEY`, with per-query approval. Bi gates Pi-hosted MCP resource list/template/read calls behind `--bi-mcp-resource-server <name>` and per-call approval without adding a client. Additional tool-free reviewers still need separate scope and approval.
+
+**Related fix complete:** Bi rejects workspace escapes before opening its approval dialog. Regression tests also confirm that protected shell redirects are rejected without a Bi approval prompt. A prompt from Pi or an outer host is outside Bi's control.
+
+**Last verified code baseline:** Typecheck, 163/163 automated tests, and `git diff --check` passed. Live diagnostics passed both through Bi's tool and in Pi. The user also confirmed `/worktree list` and creation in Pi.
+
+**Live P3 checks:** The user confirmed Tavily `web_search` in Pi using an official Node.js documentation query. With the local `bi-smoke` MCP fixture, Pi/Codemode blocked a call for a nonmatching server name, listed `docs://smoke/hello`, and returned the expected text when reading that resource.
+
+**Next:** No required P3 smoke test remains for the implemented scope. Additional tool-free reviewers remain deferred pending scope and approval.
+
+**MCP feasibility checked locally:** The installed Pi CLI (1.6.0) and Bi's development peer (1.5.2) document built-in `list_mcp_resources`, `list_mcp_resource_templates`, and `read_mcp_resource` when a connected server exposes resources. Pi already handles server configuration and authentication. The public extension API exposes server registration/configuration, not a live resource client; the documented `tool_call` hook can gate built-in tool calls, including nested calls. Bi allows one explicitly selected server per launch, requires the server on every list and read call, and prompts before forwarding to Pi. Pi can return images and write other binary resources to temporary files; the Bi permission gate does not make reads text-only. No MCP server was connected for this check.
+
+## What was verified
+`temp/README.md` describes the snapshot as leaked source. Use it only to inventory capabilities; implement independently from Bi/Pi and public specs. No imports, copying, execution, packaging, or dependencies from `temp/`. `/temp/` is Git-ignored and absent from the npm files allowlist. Bi's parity features use its existing permission, Plan, discovery and verification code.
+
+This is a static inventory, not a runtime call history. No `.jsonl` or `.log` matches were found under `temp/`. `temp/src/tools.ts` assembles the candidate pool; feature/environment checks, `isEnabled()`, deny rules, mode and connected MCP servers change availability. Model `tool_use` blocks go through `temp/src/query.ts` to `StreamingToolExecutor` or `toolOrchestration.runTools`, then `toolExecution.runToolUse` validates and authorizes before `tool.call()`. An exposed tool is not necessarily called, and a requested tool is not necessarily executed.
+
+## Inventory and proposed disposition
+| Names in snapshot | Triaged Bi mapping |
+|---|---|
+| `Read`, `Edit`, `Write`, `Bash`, `Grep`, `Glob` | Reuse `read`, `edit`, `write`, `bash`, `grep`, `glob`, and `find`; `glob` matches relative paths, `grep` is literal, and `find` is substring-based. Regex content search remains optional. Do not add duplicate PascalCase aliases. |
+| `AskUserQuestion`, `TodoWrite`, `TaskCreate`, `TaskGet`, `TaskUpdate`, `TaskList` | Reuse `ask_user` and branch-local `todo`/`/tasks`. Add task detail, stable IDs and status only where needed; one store with compatibility for existing todo entries, not a second source of truth. |
+| `TaskOutput`, `TaskStop` | Partial equivalents `process` and `kill`. Handles are scoped to their owning session and retired on Pi session and branch boundaries. Output remains nonblocking; no new process operations were added. |
+| `EnterPlanMode`, `ExitPlanMode`, `VerifyPlanExecutionTool`* | Reuse `/plan`, `plan_note`, approval flow, `/verify`, and `goal_report` where relevant. Do not add any tool that leaves Plan or starts implementation without the user's approval. |
+| `Skill`, `Config`, `CtxInspectTool`* | Reuse Pi skills and Bi `/skills`, `/settings`, `/doctor`, `/context`; metadata only for discovery. No model-driven settings writes. |
+| `ToolSearch` | `/tool-search` lists registered tool names and their active/inactive status. It does not expose definitions, activate tools, or grant permissions. |
+| `NotebookEdit`, `LSP` | `notebook_edit` supports source-only cell edits, one-time approval and rewind without execution. `lsp` is opt-in for a trusted local stdio server; `/lsp` offers confirmed user-local TypeScript setup or selection of an existing server. Definition, references, hover, and diagnostics are implemented; live TypeScript diagnostics were verified. Nothing installs automatically, and code actions are not supported. |
+| `EnterWorktree`, `ExitWorktree`, `PowerShell` | `/worktree` supports create/list/leave; no removal or implicit Pi cwd mutation. PowerShell only if Windows support is requested, via the authorized shell path and explicit platform tests. |
+| `WebFetch`, `WebSearch`, `WebBrowserTool`* | Optional adapters for public pages and user-selected search provider, no network by default. Preview destination/query, cap output/time, block private/loopback/metadata endpoints and recheck redirects, do not forward credentials. Browser automation out of scope. |
+| `ListMcpResourcesTool`, `ReadMcpResourceTool`, `MCPTool` (`mcp` wrapper), `McpAuthTool` (dynamic auth) | Use approved Pi host MCP support where available, not a generic forwarding tool. Add read-only resource listing/reading later only if the host exposes it; preserve namespace/rules, size limits, user-controlled authentication. Dynamic server tool names cannot be enumerated from source alone. |
+| `StructuredOutput` (synthetic) | Optional request-scoped output validation against a caller-supplied schema, not a general-purpose tool or executor. |
+| `Agent` (legacy `Task`), `SendMessage`, `TeamCreate`, `TeamDelete`, `ListPeersTool`* | Existing `subagent` is an adapter but Pi registration does not supply `delegateAgent`. If needed, consider a separate user-started, tool-free reviewer with an approved bounded input. Do not add agent swarms, peer messaging or autonomous offensive workflows. |
+| `SendUserMessage` (legacy `Brief`), `SendUserFileTool`*, `PushNotificationTool`* | Prefer local Pi UI notifications; no upload, external delivery or extra model tool by default. |
+| `Sleep`, `CronCreate`, `CronDelete`, `CronList`, `RemoteTrigger`, `MonitorTool`*, `SubscribePRTool`*, `SuggestBackgroundPRTool`* | Defer. If there is a concrete need, start with local user-managed reminders that do not invoke tools or models. No background agents, webhook runtime, auto-PR or remote triggers. |
+| `REPL`, `WorkflowTool`*, `TerminalCaptureTool`*, `SnipTool`*, `TungstenTool`*, `OverflowTestTool`*, `TestingPermission` | No production port. Prefer approved existing execution tools, managed process output, and Pi session features. Permission and overflow cases belong in Bi tests. No session history mutation, generic script wrapper, or global terminal capture. |
+
+* Registry reference is visible but the implementation directory is missing in this snapshot; names above are source symbols, not verified model-facing names. MCP helpers and StructuredOutput have special registration paths, not ordinary always-on built-ins.

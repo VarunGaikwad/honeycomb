@@ -3,6 +3,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { MAX_UNDO_FILE_BYTES, type UndoJournal } from './undo-journal.ts';
 import { writeUnlinkedFile } from './write-file.ts';
+import { createGlobTool } from './glob.ts';
+import { createNotebookTool } from './notebook.ts';
 import { BI_CONFIG } from '../config/index.ts';
 import { CONFIG_LIMITS } from '../config/limits.ts';
 import type { Args, Tool, ToolContext } from '../types/index.ts';
@@ -96,6 +98,11 @@ export function createFileSystemTools(options: {
       return { success: true, output: `Wrote ${file}` };
     }),
     createEditTool(snapshots, options.journal),
+    ...(options.journal ? [createNotebookTool({
+      journal: options.journal,
+      readHash: (ctx, file) => snapshots.get(ctx.sessionId)?.get(file)?.sha256,
+      atomicReplace,
+    })] : []),
     tool('ls', 'List directory entries', { path: 'string?' }, async (a, c) => {
       const dir = await resolvePath(c, optionalString(a, 'path') ?? '.');
       const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -115,6 +122,7 @@ export function createFileSystemTools(options: {
       await walk(root);
       return { success: true, output: matches.join('\n') };
     }),
+    createGlobTool(),
     tool('grep', 'Search text files for a literal string; results are capped by configuration.', { path: 'string?', query: 'string' }, async (a, c) => {
       const root = await resolvePath(c, optionalString(a, 'path') ?? '.');
       const query = stringArg(a, 'query');

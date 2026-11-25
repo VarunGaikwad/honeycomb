@@ -22,7 +22,7 @@ export function registerInitCommand(pi: ExtensionAPI) {
       if (existsSync(agentsPath) && ctx.hasUI) {
         const regenerate = await ctx.ui.confirm(
           'AGENTS.md exists',
-          'Regenerate it? The file will be rewritten.',
+          'Start analyzing the project to propose an update? The actual file change may still require approval.',
         );
         if (!regenerate) {
           ctx.ui.notify('/init cancelled', 'info');

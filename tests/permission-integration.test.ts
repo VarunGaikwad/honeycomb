@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { link, mkdtemp, readFile, rename, rm, symlink, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -78,18 +79,19 @@ test('the Pi tool gate rejects linked project permission rules', async () => {
 
 function host(flag?: string, reviewer?: any) {
   const events = new Map<string, any[]>(), entries: any[] = [];
+  const tools = new Map<string, any>();
   let shortcut: any, tool: any, active = ['read', 'write', 'bash', 'goal_report'];
   const pi: any = {
     registerFlag() {}, getFlag() { return flag; },
     registerShortcut(_key: string, opts: any) { shortcut = opts.handler; },
-    registerTool(definition: any) { tool = definition; },
+    registerTool(definition: any) { tool = definition; tools.set(definition.name, definition); },
     on(name: string, handler: any) { events.set(name, [...(events.get(name) ?? []), handler]); },
     appendEntry(customType: string, data: unknown) { entries.push({ type: 'custom', customType, data }); },
     getActiveTools() { return [...active]; }, setActiveTools(names: string[]) { active = [...names]; },
   };
   const controller = createPermissionModes(pi, reviewer);
   const emit = async (name: string, event: any, ctx: any) => { let output: any; for (const handler of events.get(name) ?? []) output = await handler(event, ctx); return output; };
-  return { controller, emit, entries, shortcut: () => shortcut(), get tool() { return tool; }, get active() { return active; } };
+  return { pi, tools, controller, emit, entries, shortcut: () => shortcut(), get tool() { return tool; }, get active() { return active; } };
 }
 function context(cwd: string, selected?: string, ui = true) {
   const branch: any[] = [];
@@ -113,10 +115,43 @@ test('modes apply path, rule and Plan boundaries in every mode', async () => {
     assert.equal(decidePermission('plan', 'goal_report', {}, cwd).action, 'deny');
     assert.equal(decidePermission('plan', 'goal_report', { status: 'continue', summary: 'Investigated' }, cwd).action, 'allow');
     assert.equal(decidePermission('plan', 'write', { path: 'file' }, cwd).action, 'deny');
-    assert.equal(decidePermission('acceptEdits', 'apply_patch', { edits: [{ path: 'file', oldText: 'a', newText: 'b' }, { path: '../outside', oldText: 'a', newText: 'b' }] }, cwd).action, 'ask');
+    assert.equal(decidePermission('acceptEdits', 'apply_patch', { edits: [{ path: 'file', oldText: 'a', newText: 'b' }, { path: '../outside', oldText: 'a', newText: 'b' }] }, cwd).action, 'deny');
     assert.equal(decidePermission('bypassPermissions', 'write', { path: 'file', content: '' }, cwd, { ask: ['write:*'] }).action, 'ask');
     assert.equal(decidePermission('dontAsk', 'read', { path: '.env' }, cwd).action, 'deny');
   } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('workspace escapes and protected shell redirects are blocked without opening an approval prompt', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'bi-deny-before-prompt-'));
+  try {
+    const cwd = path.join(root, 'project');
+    const other = path.join(root, 'other');
+    await mkdir(cwd); await mkdir(other); await mkdir(path.join(cwd, '.pi'));
+    await symlink(other, path.join(cwd, 'escape'));
+    await writeFile(path.join(cwd, '.pi', 'permission-modes.json'), JSON.stringify({ ask: ['ls:*', 'glob:*', 'lsp:*'], deny: ['read:private.ts'] }));
+    const h = host(), ctx = context(cwd);
+    let prompts = 0;
+    ctx.ui.select = async () => { prompts++; return 'Allow once'; };
+    await h.emit('session_start', {}, ctx);
+    const blocked = [
+      ['ls', { path: other }, /outside the working directory/],
+      ['ls', { path: 'escape' }, /outside the working directory/],
+      ['ls', { path: null }, /Invalid path/],
+      ['copy', { source: '../other/file', destination: 'file' }, /outside the working directory/],
+      ['write', { path: 'escape/new-file', content: 'data' }, /outside the working directory/],
+      ['glob', { path: '.git', pattern: '*' }, /non-protected workspace path/],
+      ['lsp', { action: 'hover', path: 'private.ts', language_id: 'typescript', line: 0, character: 0 }, /restricted by read policy/],
+      ['bash', { command: 'ls -d "$HOME"/.bi-lsp/ typescript-language-server 2>/dev/null; grep -n cwd src/tools/lsp-client.ts' }, /protected output destination/],
+    ] as const;
+    for (const [toolName, input, reason] of blocked) {
+      const result = await h.emit('tool_call', { toolName, input, toolCallId: `blocked-${toolName}` }, ctx);
+      assert.equal(result?.block, true, toolName);
+      assert.match(result.reason, reason, toolName);
+    }
+    assert.equal(prompts, 0);
+    assert.equal(await h.emit('tool_call', { toolName: 'ls', input: {}, toolCallId: 'ordinary-list' }, ctx), undefined);
+    assert.equal(prompts, 1, 'an in-workspace list still honors the explicit Ask rule');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('Plan note is session-specific, refuses symlinks, and approval restores tools without a kickoff', async () => {
@@ -180,7 +215,7 @@ test('footer redraws on mode change, retains a narrow label and unsubscribes', (
   let mode: PermissionMode = 'default';
   const controller = { get mode() { return mode; }, label: 'Manual', cycle() {}, subscribe(fn: () => void) { notify = fn; return () => { unsubscribed = true; }; } };
   const ctx: any = { cwd: process.cwd(), sessionManager: { getBranch: () => [] }, ui: { setHeader() {}, setFooter(factory: any) { footer = factory({ requestRender() { renders++; } }, { fg: (_: any, text: string) => text }, { onBranchChange: () => () => {}, getGitBranch: () => undefined }); } } };
-  installTui(ctx, controller);
+  installTui(ctx, controller, 'compact');
   assert.match(footer.render(12)[0], /Manual/);
   assert.match(footer.render(80)[0], /^(?:⏸|\|\|) manual mode on\b/);
   controller.label = 'Plan'; mode = 'plan'; notify(); assert.equal(renders, 1);
@@ -240,6 +275,120 @@ test('No prompts and noninteractive contexts decline the underlying tool confirm
     mode = 'default'; ctx.hasUI = false;
     assert.equal((await defs.get('bash').execute('3', { command: 'pwd' }, undefined, undefined, ctx)).isError, true);
     assert.equal(prompts, 0);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('git commit combines approvals and binds them to one exact call', async () => {
+  const { registerTools } = await import('../src/extension/register-tools.ts');
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-commit-approval-'));
+  const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  try {
+    git('init', '-q');
+    git('config', 'user.name', 'Bi Test'); git('config', 'user.email', 'bi@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    await writeFile(path.join(cwd, 'file'), 'staged');
+    git('add', 'file');
+    const h = host();
+    registerTools(h.pi, h.controller);
+    const ctx = context(cwd);
+    const titles: string[] = [];
+    let selected = 'Deny', extraConfirmations = 0;
+    ctx.ui.select = async (title?: string) => { titles.push(title!); return selected; };
+    ctx.ui.confirm = async () => { extraConfirmations++; return false; };
+    await h.emit('session_start', {}, ctx);
+    const input = { message: 'Record staged file' };
+    const gate = (toolCallId: string) => h.emit('tool_call', { toolName: 'git_commit', toolCallId, input }, ctx);
+    const execute = (id: string, args = input) => h.tools.get('git_commit').execute(id, args, undefined, undefined, ctx);
+    assert.equal((await gate('declined')).block, true);
+    assert.equal((await execute('declined')).isError, true);
+    selected = 'Yes, commit once';
+    assert.equal(await gate('call'), undefined);
+    assert.equal((await execute('other')).isError, true);
+    assert.equal((await execute('call')).isError, undefined);
+    assert.equal((await execute('call')).isError, true);
+    assert.equal(git('log', '-1', '--format=%s'), input.message);
+    assert.deepEqual(titles, Array(2).fill(`Commit staged changes?\nPermission requires confirmation\n${input.message}`));
+    selected = 'Allow once';
+    for (const [toolName, args] of [
+      ['git_add', { paths: ['file'] }],
+      ['git_branch', { name: 'audit-branch' }],
+      ['git_checkout', { branch: 'audit-branch' }],
+    ] as const) {
+      const toolCallId = `combined-${toolName}`;
+      assert.equal(await h.emit('tool_call', { toolName, toolCallId, input: args }, ctx), undefined);
+      assert.equal((await h.tools.get(toolName).execute(toolCallId, args, undefined, undefined, ctx)).isError, undefined);
+    }
+    await writeFile(path.join(cwd, 'delete-me'), 'temporary');
+    const deletion = { path: 'delete-me' };
+    assert.equal(await h.emit('tool_call', { toolName: 'delete', toolCallId: 'delete-once', input: deletion }, ctx), undefined);
+    assert.equal((await h.tools.get('delete').execute('delete-once', deletion, undefined, undefined, ctx)).isError, undefined);
+    await assert.rejects(readFile(path.join(cwd, 'delete-me')));
+    for (const [toolName, args] of [
+      ['bash', { command: 'pwd' }],
+      ['run_code', { code: "console.log('ok')" }],
+    ] as const) {
+      const toolCallId = `combined-${toolName}`;
+      assert.equal(await h.emit('tool_call', { toolName, toolCallId, input: args }, ctx), undefined);
+      assert.equal((await h.tools.get(toolName).execute(toolCallId, args, undefined, undefined, ctx)).isError, undefined);
+    }
+    const collision = { command: 'pwd' };
+    assert.equal(await h.emit('tool_call', { toolName: 'bash', toolCallId: 'collision', input: collision }, ctx), undefined);
+    assert.equal((await h.tools.get('background').execute('collision', collision, undefined, undefined, ctx)).isError, true);
+    const terminalArgs = { command: 'read -r line' };
+    assert.equal(await h.emit('tool_call', { toolName: 'terminal', toolCallId: 'terminal-start', input: terminalArgs }, ctx), undefined);
+    const terminal = await h.tools.get('terminal').execute('terminal-start', terminalArgs, undefined, undefined, ctx);
+    assert.equal(terminal.isError, undefined);
+    const terminalInput = { processId: terminal.details.metadata.processId, input: 'done\n' };
+    assert.equal(await h.emit('tool_call', { toolName: 'terminal', toolCallId: 'terminal-input', input: terminalInput }, ctx), undefined);
+    assert.equal((await h.tools.get('terminal').execute('terminal-input', terminalInput, undefined, undefined, ctx)).isError, undefined);
+    const background = { command: 'true' };
+    assert.equal(await h.emit('tool_call', { toolName: 'background', toolCallId: 'background-start', input: background }, ctx), undefined);
+    assert.equal((await h.tools.get('background').execute('background-start', background, undefined, undefined, ctx)).isError, undefined);
+    assert.equal(extraConfirmations, 0);
+    selected = 'Yes, commit once';
+
+    await writeFile(path.join(cwd, 'file'), 'new staged content');
+    git('add', 'file');
+    assert.equal(await gate('edited'), undefined);
+    assert.equal((await execute('edited', { message: 'Different message' })).isError, true);
+    assert.equal(await gate('mode-change'), undefined);
+    h.shortcut();
+    assert.equal((await execute('mode-change')).isError, true);
+    assert.equal(await gate('rule-change'), undefined);
+    await mkdir(path.join(cwd, '.pi'));
+    await writeFile(path.join(cwd, '.pi', 'permission-modes.json'), '{"deny":["git_commit:*"]}');
+    assert.equal((await execute('rule-change')).isError, true);
+    const promptCount = titles.length;
+    assert.equal((await gate('denied')).block, true);
+    assert.equal(titles.length, promptCount);
+    assert.equal(git('rev-list', '--count', 'HEAD'), '1');
+    assert.equal(extraConfirmations, 0);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('Bi undo defers its gate prompt to the target-aware confirmation', async () => {
+  const { registerTools } = await import('../src/extension/register-tools.ts');
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'bi-undo-prompt-'));
+  try {
+    const h = host();
+    h.pi.getAllTools = () => [{ name: 'undo', sourceInfo: { path: new URL('../src/index.ts', import.meta.url).pathname } }];
+    registerTools(h.pi, h.controller);
+    const ctx = context(cwd);
+    let gatePrompts = 0, confirmations = 0;
+    ctx.ui.select = async () => { gatePrompts++; return 'Allow once'; };
+    ctx.ui.confirm = async () => { confirmations++; return true; };
+    await h.emit('session_start', {}, ctx);
+    const write = { path: 'file', content: 'created' };
+    await h.emit('tool_call', { toolName: 'write', toolCallId: 'write', input: write }, ctx);
+    await h.tools.get('write').execute('write', write, undefined, undefined, ctx);
+    gatePrompts = 0;
+    assert.equal(await h.emit('tool_call', { toolName: 'undo', toolCallId: 'undo', input: {} }, ctx), undefined);
+    assert.equal((await h.tools.get('undo').execute('undo', {}, undefined, undefined, ctx)).isError, undefined);
+    assert.equal(gatePrompts, 0); assert.equal(confirmations, 1);
+    await assert.rejects(readFile(path.join(cwd, 'file')));
+    h.pi.getAllTools = () => [{ name: 'undo', sourceInfo: { path: '/other/extension.ts' } }];
+    await h.emit('tool_call', { toolName: 'undo', toolCallId: 'external', input: {} }, ctx);
+    assert.equal(gatePrompts, 1);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 

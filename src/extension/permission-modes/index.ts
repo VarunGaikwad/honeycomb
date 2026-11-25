@@ -1,20 +1,25 @@
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
+import { fileURLToPath } from 'node:url';
 import { createPermissionPrompter } from '../../tui/permission-dialog.ts';
 import { registerPermissionRules, type PermissionActivity } from '../../tui/permission-rules.ts';
 import { decidePermission } from './policy.ts';
 import { loadPermissionRules } from './rules.ts';
+import { isMcpResourceTool, MCP_RESOURCE_SERVER_FLAG, validMcpServerName } from './mcp-resources.ts';
 import { MODE_ENTRY, restorePermissionMode } from './state.ts';
 import { discardPlanNote, MAX_PLAN_BYTES, planNotePath, readPlanNote, writePlanNote } from './plan-note.ts';
 import { previewToolCall } from './preview.ts';
 import { classifyShell } from './shell.ts';
 import { resolvePermissionPath } from './paths.ts';
 import { readGoalState } from '../../commands/goal/state.ts';
+import { selectedLspServer } from '../lsp-menu.ts';
+import { WEB_FETCH_FLAG } from '../../tools/web-fetch.ts';
+import { getTavilyKey, WEB_SEARCH_FLAG, webSearchSetupTip } from '../../tools/web-search.ts';
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'dontAsk' | 'bypassPermissions';
 const cycle: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'auto'];
 const labels: Record<PermissionMode, string> = { default: 'Manual', acceptEdits: 'Edits', plan: 'Plan', auto: 'Auto', dontAsk: 'No prompts', bypassPermissions: 'Bypass' };
-const planTools = new Set(['read', 'ls', 'grep', 'find', 'git_status', 'git_diff', 'git_log', 'git_branch', 'goal_report', 'todo', 'plan', 'ask_user', 'plan_note']);
+const planTools = new Set(['read', 'ls', 'grep', 'find', 'glob', 'git_status', 'git_diff', 'git_log', 'git_branch', 'goal_report', 'todo', 'plan', 'ask_user', 'plan_note']);
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)]));
@@ -26,7 +31,7 @@ function approvalKey(cwd: string, tool: string, args: Record<string, unknown>): 
   if (tool === 'apply_patch' && Array.isArray(args.edits)) {
     for (const edit of args.edits) if (edit && typeof edit === 'object') paths.push(edit.path);
   }
-  if (['ls', 'grep', 'find'].includes(tool) && args.path === undefined) paths.push('.');
+  if (['ls', 'grep', 'find', 'glob'].includes(tool) && args.path === undefined) paths.push('.');
   if (['bash', 'background', 'terminal'].includes(tool) && typeof args.command === 'string') {
     const shell = classifyShell(args.command, cwd);
     if (shell.kind === 'read') paths.push(...shell.paths);
@@ -46,6 +51,7 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
   let turnDeclines = 0, sessionDeclines = 0;
   const listeners = new Set<() => void>();
   const approvals = new Set<string>();
+  const commitApprovals = new Map<string, (ctx: ExtensionContext, args: Record<string, unknown>, tool: string, server?: string) => boolean>();
   const denials: PermissionActivity[] = [];
   const prompter = createPermissionPrompter();
   const block = (tool: string, reason: string) => {
@@ -54,6 +60,7 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
     return { block: true as const, reason };
   };
   pi.registerFlag?.('permission-mode', { description: 'Permission mode (default, acceptEdits, plan, auto, dontAsk, bypassPermissions)', type: 'string' });
+  pi.registerFlag?.(MCP_RESOURCE_SERVER_FLAG, { type: 'string', description: 'Allow prompts for Pi MCP resource calls to one configured server by name' });
   const allowed = (value: string): value is PermissionMode => cycle.includes(value as PermissionMode) ||
     (value === 'dontAsk' && launchMode === value) || (value === 'bypassPermissions' && launchMode === value && bypassConfirmed);
   const change = (next: PermissionMode, persist = true) => {
@@ -67,6 +74,7 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
     mode = next;
     epoch++;
     approvals.clear();
+    commitApprovals.clear();
     if (next !== 'plan') pendingPlan = undefined;
     if (persist) pi.appendEntry?.(MODE_ENTRY, { mode: next });
     for (const fn of listeners) fn();
@@ -92,6 +100,7 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
   });
   pi.on('session_start', async (event, ctx) => {
     epoch++;
+    commitApprovals.clear();
     approvals.clear(); denials.length = 0; pendingPlan = undefined; priorTools = undefined; mode = 'default'; turnDeclines = 0; sessionDeclines = 0;
     launchMode = pi.getFlag?.('permission-mode') as string | undefined;
     bypassConfirmed = false;
@@ -115,6 +124,7 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
   pi.on('session_shutdown', event => {
     epoch++;
     approvals.clear();
+    commitApprovals.clear();
     // Pi snapshots the active tools after shutdown when rebuilding on reload.
     if (event.reason === 'reload' && mode === 'plan' && priorTools) pi.setActiveTools(priorTools);
   });
@@ -128,6 +138,7 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
   pi.registerShortcut('alt+m', { description: 'Cycle permission mode', handler: cycleMode });
   pi.on('agent_start', () => { turnDeclines = 0; });
   pi.on('turn_start', () => { turnDeclines = 0; });
+  pi.on('turn_end', () => { commitApprovals.clear(); });
   const decline = () => {
     if (mode !== 'auto') return;
     turnDeclines++; sessionDeclines++;
@@ -170,21 +181,45 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
     } catch { /* Dismissal and UI errors leave Plan active. */ }
   });
   pi.on('tool_call', async (event, ctx) => {
-    const { toolName, input } = event;
+    const { toolName, input, toolCallId } = event;
+    const isCommit = toolName === 'git_commit';
+    const combinedGit = isCommit || toolName === 'git_add' || toolName === 'git_checkout' || (toolName === 'git_branch' && typeof (input as Record<string, unknown>).name === 'string');
+    const webFetch = toolName === 'web_fetch';
+    const webSearch = toolName === 'web_search';
+    const combined = (combinedGit || webSearch || ['bash', 'background', 'terminal', 'run_code', 'delete', 'notebook_edit', 'lsp', 'web_fetch'].includes(toolName)) && typeof ctx.sessionManager?.getSessionId === 'function';
+    if (combined) commitApprovals.delete(toolCallId);
     const started = epoch;
     const args = input as Record<string, unknown>;
     const deny = (reason: string) => block(toolName, reason);
+    const mcpResource = isMcpResourceTool(toolName);
+    const mcpResourceEnabled = () => {
+      const server = pi.getFlag?.(MCP_RESOURCE_SERVER_FLAG);
+      return ctx.hasUI && ctx.isProjectTrusted?.() && validMcpServerName(server) && args?.server === server;
+    };
+    if (mcpResource && !mcpResourceEnabled()) return deny('MCP resources require an interactive trusted project and an explicit server matching --bi-mcp-resource-server.');
+    const webFetchEnabled = () => ctx.hasUI && ctx.isProjectTrusted?.() && pi.getFlag?.(WEB_FETCH_FLAG) === true && pi.getActiveTools().includes('web_fetch');
+    if (webFetch && (!combined || !webFetchEnabled())) return deny('Web fetch requires launch opt-in and an interactive trusted project.');
+    if (webSearch && !getTavilyKey()) return deny(webSearchSetupTip);
+    const webSearchEnabled = () => ctx.hasUI && ctx.isProjectTrusted?.() && !!getTavilyKey() &&
+      pi.getFlag?.(WEB_SEARCH_FLAG) === true && pi.getActiveTools().includes('web_search');
+    if (webSearch && (!combined || !webSearchEnabled())) return deny('Web search requires launch opt-in and an interactive trusted project.');
     const load = () => loadPermissionRules(ctx.cwd, message => { if (ctx.hasUI) ctx.ui.notify(message, 'warning'); else console.warn(message); });
     const loaded = load();
     if (loaded.invalid) return deny('Invalid permission configuration; correct it before running tools.');
     const decision = decidePermission(mode, toolName, input, ctx.cwd, loaded.rules);
     if (decision.action === 'deny') return deny(decision.reason);
     if (decision.action === 'allow') return undefined;
+    // Only Bi's own undo handler performs a target-aware confirmation after preflight.
+    // Other extensions' tools must continue through the normal gate.
+    if (toolName === 'undo' && mode !== 'dontAsk' && ctx.hasUI && !ctx.signal?.aborted) {
+      const registered = pi.getAllTools?.().find(tool => tool.name === 'undo');
+      if (registered?.sourceInfo.path === fileURLToPath(new URL('../../index.ts', import.meta.url))) return undefined;
+    }
     const stillCurrent = () => started === epoch && !ctx.signal?.aborted;
-    const recheck = () => {
+    const recheck = (currentInput = input) => {
       const current = load();
       if (current.invalid) return false;
-      const updated = decidePermission(mode, toolName, input, ctx.cwd, current.rules);
+      const updated = decidePermission(mode, toolName, currentInput, ctx.cwd, current.rules);
       return updated.action !== 'deny' && updated.source === decision.source && updated.reason === decision.reason;
     };
     // Only summarize a call when no operands, secrets, file contents or output are sent.
@@ -207,23 +242,35 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
     }
     if (!stillCurrent()) return deny('Permission context changed before approval.');
     if (mode === 'dontAsk' || !ctx.hasUI) return deny('Permission requires an interactive confirmation.');
-    const canSave = decision.source === 'default' && ['write', 'edit', 'mkdir', 'copy', 'move', 'delete', 'apply_patch'].includes(toolName);
+    const canSave = decision.source === 'default' && ['write', 'edit', 'mkdir', 'copy', 'move', 'apply_patch'].includes(toolName);
     try {
+      const server = toolName === 'lsp' && ctx.isProjectTrusted?.() ? await selectedLspServer(pi, ctx.cwd) : undefined;
+      if (toolName === 'lsp' && (!server || !stillCurrent())) return deny('LSP requires a trusted project and an explicitly configured server.');
       const key = approvalKey(ctx.cwd, toolName, args);
       if (canSave && approvals.has(key)) return undefined;
       const { title, preview } = previewToolCall(toolName, args);
+      const sessionId = combined ? ctx.sessionManager.getSessionId() : undefined;
+      const allowOnce = isCommit ? 'Yes, commit once' : 'Allow once';
       const selected = await prompter.choose(ctx, {
         title,
-        preview: [{ text: decision.reason, color: 'dim' }, ...preview],
+        preview: [{ text: decision.reason, color: 'dim' }, ...(server ? [{ text: `Server: ${server} --stdio` }] : []), ...preview],
         options: [
-          { value: 'Allow once', label: 'Yes, allow once' },
+          { value: allowOnce, label: isCommit ? allowOnce : 'Yes, allow once' },
           ...(canSave ? [{ value: 'Allow exact call for session', label: 'Yes, exact call for this session' }] : []),
           { value: 'Deny', label: 'No' },
         ],
         initial: 'Deny',
       });
-      if (selected === 'Allow once' || (selected === 'Allow exact call for session' && canSave)) {
-        if (!stillCurrent() || !recheck() || approvalKey(ctx.cwd, toolName, args) !== key) return deny('Permission context changed while waiting for approval.');
+      if (selected === allowOnce || (selected === 'Allow exact call for session' && canSave)) {
+        if (!stillCurrent() || !recheck() || approvalKey(ctx.cwd, toolName, args) !== key ||
+            (server && !ctx.isProjectTrusted?.()) || (webFetch && !webFetchEnabled()) || (webSearch && !webSearchEnabled()) ||
+            (mcpResource && !mcpResourceEnabled())) return deny('Permission context changed while waiting for approval.');
+        if (combined) {
+          // The prompt authorizes only this exact tool call.
+          commitApprovals.set(toolCallId, (executionCtx, executionArgs, executionTool, executionServer) =>
+            executionTool === toolName && executionServer === server && executionCtx.sessionManager.getSessionId() === sessionId && stillCurrent() && recheck(executionArgs) &&
+            approvalKey(executionCtx.cwd, toolName, executionArgs) === key);
+        }
         if (selected === 'Allow exact call for session') approvals.add(key);
         return undefined;
       }
@@ -235,7 +282,25 @@ export function createPermissionModes(pi: ExtensionAPI, options: { reviewer?: Pe
     get mode() { return mode; },
     get label() { return labels[mode]; },
     cycle: cycleMode,
+    enterPlan(): boolean {
+      if (!['default', 'acceptEdits', 'auto', 'plan'].includes(mode)) return false;
+      if (mode === 'plan') return true;
+      if (!pi.getActiveTools || !pi.setActiveTools) return false;
+      return change('plan');
+    },
     prompter,
+    consumeCommitApproval(id: string, ctx: ExtensionContext, args: Record<string, unknown>, tool = 'git_commit', server?: string): boolean | undefined {
+      const approval = commitApprovals.get(id);
+      commitApprovals.delete(id);
+      if (!ctx.hasUI || ctx.signal?.aborted) return false;
+      try {
+        if (approval) return approval(ctx, args, tool, server);
+        const loaded = loadPermissionRules(ctx.cwd, () => {});
+        // An allow decision can skip the gate, but not the Git tool's confirmation.
+        if (!loaded.invalid && decidePermission(mode, tool, args, ctx.cwd, loaded.rules).action === 'allow') return undefined;
+      } catch { /* An invalid or stale approval cannot authorize a commit. */ }
+      return false;
+    },
     subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn); }; },
   };
 }

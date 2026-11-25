@@ -7,7 +7,7 @@ export type PermissionActivity = { tool: string; reason: string };
 
 /** Read-only so a cloned project cannot acquire new tool permissions through the viewer. */
 export function registerPermissionRules(pi: ExtensionAPI, snapshot: () => { mode: string; approvals: number; denials: readonly PermissionActivity[] }): void {
-  pi.registerCommand?.('permissions', {
+  const command: Parameters<ExtensionAPI['registerCommand']>[1] = {
     description: 'Inspect effective permission rules and recent denials',
     async handler(_args, ctx) {
       if (!ctx.hasUI) return;
@@ -58,5 +58,7 @@ export function registerPermissionRules(pi: ExtensionAPI, snapshot: () => { mode
         };
       });
     },
-  });
+  };
+  pi.registerCommand?.('permissions', command);
+  pi.registerCommand?.('allowed-tools', { ...command, description: 'Alias for /permissions (read-only)' });
 }

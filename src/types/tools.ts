@@ -5,6 +5,11 @@ import type { Todo, UndoEntry } from './agent.ts';
 export interface ToolContext {
   undoEpoch?: number;
   checkUndo?: (entries: UndoEntry[]) => boolean;
+  checkNotebookEdit?: () => boolean;
+  authorizeLsp?: (file: string) => Promise<string | undefined>;
+  authorizeWebFetch?: () => boolean;
+  authorizeWebSearch?: () => string | undefined;
+  canReadLspLocation?: (file: string) => boolean;
   todoStore?: { read(): Todo[]; write(items: Todo[]): void };
   sessionId: string;
   workingDirectory: string;

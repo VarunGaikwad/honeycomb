@@ -72,6 +72,14 @@ Inside pi:
 - `/diff [staged|unstaged]` — browse tracked Git changes without a model call
 - `/doctor` — diagnose Bi preferences, permission rules, inactive tools, and Git availability
 - `/tasks` — view the current branch's goal and todos
+- `/allowed-tools` — read-only alias for `/permissions`; `/checkpoint` — alias for `/rewind` (latest eligible Bi file operation only)
+- `/verify [focus]` — ask the current agent to inspect and run permitted checks; in Plan mode, propose checks only
+- `/plan [request]` — enter Plan mode or start a planning turn; `/plan show` displays the session note subject to read rules
+- `/security-review staged|unstaged` — explicitly approve a bounded local diff for a separate tool-free model review
+- `/help`, `/skills`, `/context`, `/status` — local command discovery and session metadata
+- `/tool-search [name]` — search registered tool names and see which are active without calling them
+- `/lsp` — open the optional language server setup menu
+- `/worktree [list|create <directory-name>|leave]` — list Git checkouts, create a detached checkout, or find your way back to the main checkout
 - `/btw [question]` — ask a standalone question without adding it to the main transcript
 - `/rewind` — preview and restore the latest tracked Bi file operation
 - `/review` — reviews the current changes
@@ -99,8 +107,129 @@ not guarantee a goal will finish within the iteration budget.
 | `/diff` | TUI only. Tab switches staged/unstaged; use arrows and Enter to load one file's patch on demand. `n`/`p` opens the next/previous patch; Esc goes back or closes the picker. Untracked files and submodule changes are omitted. The viewer honors `git_diff` rules, asks before showing sensitive paths, and does not modify the worktree or index. |
 | `/doctor` | Read-only diagnostics in TUI or RPC. Shows effective settings and why supported preferences were ignored, without printing raw config or credential values. TUI also shows whether Bi's editor is active and how that affects its shortcuts. Use `/permissions` for rule details and `/hotkeys` for all bindings. |
 | `/tasks` | Read-only dashboard in TUI or RPC. Goal state and todos follow the active transcript branch. Verification is the agent's latest report, not an independent check. Use `/goal` to manage the goal. |
+| `/help [command]` | Lists discovered extension, prompt and skill commands. Pi TUI built-ins are not included in discovery; `/clear` corresponds to `/new`, `/config` to `/settings`, and `/exit` to `/quit`. |
+| `/skills` | Lists loaded skill metadata and separately lists exposed skill commands; does not read skill bodies. |
+| `/context` | Shows estimated token usage and metadata counts, not prompt or file contents. Usage can be unknown. |
+| `/status` | Shows local model, trust, permission mode, active tool count and goal status. No provider quota request is made. |
+| `/verify [focus]` | Starts a model turn with the focus text and current conversation. The agent inspects checks and uses existing tool permissions; in Plan mode it is instructed to propose checks only. |
+| `/plan [request]` | Idle TUI only. Enters Plan without starting a turn unless a request is supplied; `/plan show` displays the session note if read rules allow it. It does not leave No prompts or Bypass, or approve implementation. |
+| `/security-review staged\|unstaged` | Idle TUI only, outside Plan and No prompts. Sends the selected tracked local diff (maximum 12 KB) to the selected provider only after confirmation; protected diffs are refused. No conversation or tools are sent. Provider retention policies apply. |
+
+These four views do not start a model turn or send their output to the provider. RPC receives bounded notifications; print and JSON modes do not display the panels.
+
+For user-owned Claude commands and skills, migrate manually: review `.claude/commands/*.md` and adapt them to `.pi/prompts/*.md`, and review `.claude/skills/` for migration to `.agents/skills/`. Adapt arguments and tool names to Pi and Bi. Bi does not automatically import these files, expand shell commands, run hooks, or grant their `allowed-tools` permissions.
 | `/btw` | Idle TUI only, outside Plan and No prompts. After confirmation, the active provider receives the question, but no main transcript, project files, or tools. Esc cancels. Usage is shown separately in the overlay. Provider retention policies still apply. Inline questions can appear in Pi's input history; use bare `/btw` for a separate input field. |
-| `/rewind` | Idle TUI only, outside Plan and No prompts. Previews the affected paths and always asks for confirmation. Supports tracked `edit`, `write`, and `apply_patch`; a newly created file can be removed, but parent directories are left in place. Refuses changed files. Multi-file rollback is best-effort and reports incomplete restores. History is bounded and in memory; it does not survive branch changes, reload, or session switch. Shell commands, Git state, and conversation history are not rewound. |
+| `/rewind` | Idle TUI only, outside Plan and No prompts. Previews the affected paths and always asks for confirmation. Supports tracked `edit`, `write`, `apply_patch`, and `notebook_edit`; a newly created file can be removed, but parent directories are left in place. Refuses changed files. Multi-file rollback is best-effort and reports incomplete restores. History is bounded and in memory; it does not survive branch changes, reload, or session switch. Shell commands, Git state, and conversation history are not rewound. |
+
+### Tool discovery and file matching
+
+`/tool-search [name]` shows tool names and active/inactive status for the current
+session in TUI or RPC. Active means exposed to the model, not authorized to run.
+This is not a usage log. See the [tool parity matrix](plan/tool-parity.md).
+
+`glob` lists files matching a relative pattern such as `src/**/*.ts`, with an
+optional workspace subdirectory as its search root. Patterns support `*`, `?`,
+and `**` as a path component. Unlike `find` (name substring) and `grep` (literal
+contents), it matches relative paths without reading file contents. It skips
+symlinks, protected paths, and `.pi`/`.bi` state directories, and bounds both the
+scan and the results. It does not parse project `.gitignore` files.
+
+`notebook_edit` edits the source of one existing cell in a local nbformat 4
+`.ipynb` file (up to 1 MiB). Read the notebook first, then provide `path`,
+zero-based `cell_index`, exact `old_source`, and `new_source`. For array sources,
+join the strings without adding separators. Bi previews the change and requires
+one-time approval; cells are never executed, and bytes outside the selected
+source value are preserved. Both the filesystem and agent groups must be enabled
+so the edit can be tracked by `/rewind`. This tool is unavailable in Plan mode.
+
+### Optional local language-server queries
+
+In an idle, trusted Pi terminal, open `/lsp`. Use the arrow keys and Enter to
+choose **TypeScript / JavaScript** or **Use an existing server**, or Esc to exit.
+On macOS/Linux with npm on `PATH`, Bi can download the displayed versions from
+npm and install them under `~/.bi-lsp/` only after confirmation. npm lifecycle
+scripts are disabled, and project and global npm packages are not changed. The
+existing-server option takes an absolute executable path outside the workspace
+and requires `--stdio` support. Managed setup needs a data folder outside the workspace.
+
+Enabling a server for the current session is a separate confirmation. You can
+also opt in at launch with `--bi-lsp-server /absolute/path/to/server`. If no
+managed, configured or `PATH` TypeScript server is found, rotating working tips
+point to `/lsp`. The tool starts one process per approved query and is blocked
+in Plan and No prompts modes.
+For example, send `{"action":"definition","path":"src/index.ts","language_id":"typescript","line":0,"character":0}`.
+Positions are zero-based UTF-16. `references` and `hover` also take a position;
+`diagnostics` omits it and needs a server that supports pull or publishes on open.
+
+Only use a server you trust: it receives the source file and workspace path,
+and can read other files or run code under your user account. This is not a
+sandbox. Bi does not honor server requests for client actions (such as applying
+edits); returned locations are limited to permitted workspace files. Each request
+has an eight-second deadline, so cold or large projects may time out.
+
+### Git worktrees
+
+From the root of a trusted Git checkout in an idle Pi terminal:
+
+- `/worktree` or `/worktree list` lists linked checkouts and marks the current one.
+- `/worktree create <directory-name>` previews a new subdirectory and the exact
+  commit to check out in detached HEAD state. Creation needs explicit confirmation
+  and a clean checkout. Ordinary untracked files still block creation; registered
+  nested worktrees are separate checkouts and don't count as parent changes, even
+  if `git status` lists them as untracked. Changes inside submodules are ignored.
+  Checkout hooks and external Git filters are disabled for this command.
+- `/worktree leave` identifies the main checkout and warns about local changes
+  in the current linked checkout. It leaves the checkout and all files intact.
+
+Open a new Pi session to use a different checkout. These commands never switch
+Pi's working directory, remove worktrees, or create branches.
+
+### Optional public web fetch
+
+Launch Pi with `pi -e ./ --bi-web-fetch` in a trusted workspace. Ask the model,
+for example, “Read `https://example.org/` and summarize it.” The model proposes
+URLs via `web_fetch`; Bi previews the full destination and asks for approval on
+**each** request. Plan, No prompts, and noninteractive sessions cannot fetch.
+
+The tool issues an HTTPS GET to a public IPv4 address on the default port. It
+uses no cookies, credentials, or proxy and does not execute page scripts. The
+site sees the requested URL (including query parameters) and your network address.
+Never put secrets in URLs. Redirects are not followed: the model must request
+any new destination separately. Only uncompressed text, HTML, Markdown, and JSON
+are supported, with a 10-second deadline, a 128 KiB response cap, and truncated
+model output. Returned text is untrusted. This feature does not search the web.
+
+### Optional Tavily web search
+
+Set `TAVILY_API_KEY` in the shell that launches Pi, then run
+`pi -e ./ --bi-web-search` in a trusted workspace. Do not put the key in
+`settings.json`, project files, or chat. If the key is missing, Bi leaves
+`web_search` inactive and shows a startup warning and a working tip.
+
+Ask the model to search for a topic. Bi previews the exact query and requires
+one-time approval before sending it to Tavily. Tavily receives the query and
+returns up to five results to Bi; the model sees those results, not the API
+key. Avoid sending secrets in queries. Plan, No prompts, and noninteractive
+sessions cannot search. `web_fetch` remains separate and does not need a key.
+
+### Optional Pi MCP resource access
+
+Configure an MCP server you trust in Pi and check its name and source in `/mcp`.
+Then launch `pi -e ./ --bi-mcp-resource-server docs`, replacing `docs` with the
+exact configured server name. The flag does not configure or connect a server;
+Pi still owns connections, authentication and tool exposure.
+
+If Pi exposes `list_mcp_resources`, `list_mcp_resource_templates`, or
+`read_mcp_resource`, Bi requires the selected server explicitly and asks for
+one-time approval for each call. Resource reads show the URI before approval.
+Bi blocks these calls without the flag, in untrusted projects, in Plan or No
+prompts mode, and without an interactive UI. Existing deny rules can match the
+server name or URI, for example `read_mcp_resource:docs`.
+
+This gate applies only to those three resource tools, not other MCP capabilities.
+Pi controls output handling: listed metadata and returned text or images can
+reach the model, and binary data can be saved to temporary files. This is not a
+text-only mode. Check which server a project config selects before approving.
 
 ### Tool execution safety
 
@@ -109,6 +238,13 @@ Shell, background, terminal, and code-execution tools require either an
 approval through the tool context. Destructive filesystem and Git operations
 also require a UI approval callback; both kinds of operation are denied when
 the extension has no UI or configured policy.
+
+Managed process IDs and output belong to the Pi session that started them.
+Session replacement, branch changes, and shutdown (including reload) retire
+those IDs and cancel in-flight execution. Bi closes its process pipes and
+terminates still-running managed process groups on POSIX. This is not a sandbox:
+commands that leave their process group or outlive its exited leader are not
+covered by cleanup.
 
 ### Low-code configuration
 
@@ -176,13 +312,13 @@ Permission dialogs show what is being requested, including proposed file changes
 | Mode | Behavior |
 | --- | --- |
 | Manual (`default`) | Ordinary reads pass the mode gate; edits and uncertain calls require approval. |
-| Edits (`acceptEdits`) | Also permits ordinary project edits after path checks. Outside and sensitive paths require approval. |
+| Edits (`acceptEdits`) | Also permits ordinary project edits after path checks. Sensitive operations still require approval when eligible. |
 | Plan (`plan`) | Restricts the active tools to investigation and session bookkeeping. `plan_note` writes only `.pi/plans/<session-id>.md`; after a change, choose whether to start in Edits or Manual, keep planning, or discard the note. |
 | Auto (`auto`) | Uses the Edits rules. With no configured reviewer it falls back to asking; the injectable reviewer receives only a safe summary and times out after 15 seconds. |
 | No prompts (`dontAsk`) | Declines calls whenever either the mode gate or a bi tool requires confirmation. Launch only with `--permission-mode dontAsk`. |
 | Bypass (`bypassPermissions`) | Skips routine mode prompts for eligible calls, after interactive confirmation at launch with `--permission-mode bypassPermissions`. |
 
-The last two modes are not in the shortcut cycle. Bypass cannot be restored from a transcript without the launch flag and confirmation. An approval can be granted once or, for eligible file calls, for those exact arguments and resolved paths during the session. Sensitive or outside paths require fresh confirmation. Explicit ask and deny rules always take precedence.
+The last two modes are not in the shortcut cycle. Bypass cannot be restored from a transcript without the launch flag and confirmation. An approval can be granted once or, for eligible file calls, for those exact arguments and resolved paths during the session. Bi rejects hard policy blocks before its own approval dialog: workspace file tools cannot open paths outside the workspace, including through symlinks, and protected shell redirects (including `2>/dev/null`) stay blocked. An approval from Pi or another layer cannot override these restrictions. Eligible sensitive or outside-path calls still require fresh confirmation. Deny rules take precedence over Ask and Allow; none can override a hard boundary.
 
 Optional trusted user settings live in `~/.pi/agent/permission-modes.json`. For example:
 

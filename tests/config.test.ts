@@ -134,7 +134,7 @@ test('project config overrides safe defaults and caps process output', async () 
     assert.equal(commandResult.output?.length, 256);
     assert.ok(commandResult.output?.endsWith('\n... [output truncated]'));
     assert.equal(commandResult.metadata?.outputTruncated, true);
-    assert.equal(processManager.list()[0]?.output.length, 256);
+    assert.equal(processManager.list(context(dir).sessionId)[0]?.output.length, 256);
   });
 });
 

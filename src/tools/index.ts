@@ -6,6 +6,9 @@ import { ToolDispatcher } from './dispatcher.ts';
 import { createExecutionTools } from './execution.ts';
 import { createFileSystemTools } from './filesystem.ts';
 import { createGitTools } from './git.ts';
+import { createLspTool } from './lsp.ts';
+import { createWebFetchTool } from './web-fetch.ts';
+import { createWebSearchTool } from './web-search.ts';
 import { createUndoJournal } from './undo-journal.ts';
 import { ToolRegistry } from './registry.ts';
 
@@ -26,7 +29,7 @@ export function createToolSystem(options: { askUser?: AskUserFn; config?: BiConf
     ...(config.toolGroups.execution ? execution.tools : []),
     ...(config.toolGroups.git ? createGitTools(config.git) : []),
     ...(config.toolGroups.agent ? createAgentTools({ ...options, journal }) : []),
-    ...(config.toolGroups.advanced ? createAdvancedTools() : []),
+    ...(config.toolGroups.advanced ? [...createAdvancedTools(), createLspTool(), createWebFetchTool(), createWebSearchTool()] : []),
   ];
   for (const tool of tools) registry.register(tool);
   return {
